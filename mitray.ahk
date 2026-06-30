@@ -41,10 +41,8 @@ global WebUIPath := ""
 global WebUIName := ""
 global AutoStartCore := true
 global AutoStartupDelaySec := 15
-global RememberTUN := true
+global TUNControl := "runtime"  ; "runtime" 或 "file"
 global DesiredTUNEnabled := false
-global TUNStateConfigured := false
-global AutoRestoreTUN := true
 
 ; State
 global IsProxyEnabled := false
@@ -75,7 +73,7 @@ if (AutoStartCore) {
 
         ; Get initial TUN status from API before starting monitoring
         GetTUNStatusFromAPI()
-        RestoreRememberedTUNState()
+        ApplyRuntimeTUNControl()
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -91,7 +89,7 @@ if (AutoStartCore) {
 
         ; Get initial TUN status from API
         GetTUNStatusFromAPI()
-        RestoreRememberedTUNState()
+        ApplyRuntimeTUNControl()
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -141,11 +139,11 @@ ReadConfigValues() {
 
     ; Read Settings section
     AutoStartCore := IniRead(ConfigFile, "Settings", "AutoStartCore", "1") = "1"
-    RememberTUN := IniRead(ConfigFile, "Settings", "RememberTUN", "1") = "1"
-    tunValue := IniRead(ConfigFile, "Settings", "TUNEnabled", "__missing__")
-    TUNStateConfigured := tunValue != "__missing__"
-    DesiredTUNEnabled := TUNStateConfigured ? (tunValue = "1") : false
-    AutoRestoreTUN := IniRead(ConfigFile, "Settings", "AutoRestoreTUN", "1") = "1"
+    TUNControl := IniRead(ConfigFile, "Settings", "TUNControl", "runtime")
+    if (TUNControl != "runtime" && TUNControl != "file") {
+        TUNControl := "runtime"
+    }
+    DesiredTUNEnabled := IniRead(ConfigFile, "Settings", "TUNEnabled", "0") = "1"
     delayValue := IniRead(ConfigFile, "Settings", "AutoStartupDelaySec", "15")
     if (RegExMatch(delayValue, "^\d+$")) {
         AutoStartupDelaySec := delayValue + 0
@@ -223,7 +221,7 @@ IsConfigUsable() {
     return ConfigPath && FileExist(ConfigPath)
 }
 
-SaveSettingsConfig(corePath, configPath, configURL, autoStart, rememberTun, tunEnabled, autoRestoreTun, delaySec) {
+SaveSettingsConfig(corePath, configPath, configURL, autoStart, tunControl, tunEnabled, delaySec) {
     global ConfigFile, ActiveProfile, Profiles
 
     if (!ActiveProfile) {
@@ -244,10 +242,15 @@ SaveSettingsConfig(corePath, configPath, configURL, autoStart, rememberTun, tunE
         }
 
         IniWrite(autoStart ? "1" : "0", ConfigFile, "Settings", "AutoStartCore")
-        IniWrite(rememberTun ? "1" : "0", ConfigFile, "Settings", "RememberTUN")
+        IniWrite(tunControl, ConfigFile, "Settings", "TUNControl")
         IniWrite(tunEnabled ? "1" : "0", ConfigFile, "Settings", "TUNEnabled")
-        IniWrite(autoRestoreTun ? "1" : "0", ConfigFile, "Settings", "AutoRestoreTUN")
         IniWrite(delaySec, ConfigFile, "Settings", "AutoStartupDelaySec")
+        try {
+            IniDelete(ConfigFile, "Settings", "RememberTUN")
+        }
+        try {
+            IniDelete(ConfigFile, "Settings", "AutoRestoreTUN")
+        }
         return true
     } catch as err {
         MsgBox("保存配置失败: " . err.Message, "MiTray", "Iconx")
@@ -280,14 +283,13 @@ ConfigURL=
 ; Auto-start mihomo on script launch (1=yes, 0=no)
 AutoStartCore=1
 
-; Remember and restore TUN runtime state through mihomo API (1=yes, 0=no)
-RememberTUN=1
+; TUN control source:
+; runtime = MiTray applies TUN state through mihomo API
+; file    = follow tun.enable in YAML
+TUNControl=runtime
 
-; Desired TUN state remembered by MiTray (1=enabled, 0=disabled)
+; Desired TUN state when TUNControl=runtime (1=enabled, 0=disabled)
 TUNEnabled=0
-
-; Re-apply remembered TUN state after mihomo restart or WebUI config reload (1=yes, 0=no)
-AutoRestoreTUN=1
 
 ; Delay (seconds) before auto-start task runs after user logon (0-600)
 AutoStartupDelaySec=15
@@ -297,7 +299,7 @@ AutoStartupDelaySec=15
 }
 
 ShowSettingsGui(firstRun := false) {
-    global CorePath, ConfigPath, ConfigURL, AutoStartCore, RememberTUN, DesiredTUNEnabled, AutoRestoreTUN, AutoStartupDelaySec
+    global CorePath, ConfigPath, ConfigURL, AutoStartCore, TUNControl, DesiredTUNEnabled, AutoStartupDelaySec
 
     state := {Done: false, Saved: false}
     title := firstRun ? "MiTray 首次设置" : "MiTray 设置"
@@ -320,14 +322,14 @@ ShowSettingsGui(firstRun := false) {
     autoStartCheck := settingsGui.Add("Checkbox", "x140 y135 w220", "启动 MiTray 时自动启动 mihomo")
     autoStartCheck.Value := AutoStartCore ? 1 : 0
 
-    rememberTunCheck := settingsGui.Add("Checkbox", "x140 y165 w220", "记忆 TUN 状态")
-    rememberTunCheck.Value := RememberTUN ? 1 : 0
+    settingsGui.Add("Text", "x14 y165 w120", "TUN 控制")
+    tunRuntimeRadio := settingsGui.Add("Radio", "x140 y165 w190", "MiTray 运行时接管")
+    tunFileRadio := settingsGui.Add("Radio", "x340 y165 w190", "跟随 YAML 的 tun.enable")
+    tunRuntimeRadio.Value := (TUNControl = "runtime") ? 1 : 0
+    tunFileRadio.Value := (TUNControl = "file") ? 1 : 0
 
-    tunEnabledCheck := settingsGui.Add("Checkbox", "x370 y165 w180", "期望 TUN 开启")
+    tunEnabledCheck := settingsGui.Add("Checkbox", "x140 y195 w260", "接管时开启 TUN")
     tunEnabledCheck.Value := DesiredTUNEnabled ? 1 : 0
-
-    autoRestoreTunCheck := settingsGui.Add("Checkbox", "x140 y195 w300", "重启或 WebUI 重载后自动恢复 TUN")
-    autoRestoreTunCheck.Value := AutoRestoreTUN ? 1 : 0
 
     settingsGui.Add("Text", "x14 y232 w120", "自启延迟秒数")
     delayEdit := settingsGui.Add("Edit", "x140 y229 w80 Number", AutoStartupDelaySec)
@@ -350,7 +352,7 @@ ShowSettingsGui(firstRun := false) {
     testBtn.OnEvent("Click", (*) => UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit, true))
 
     saveBtn.OnEvent("Click", (*) => SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit,
-        autoStartCheck, rememberTunCheck, tunEnabledCheck, autoRestoreTunCheck, delayEdit))
+        autoStartCheck, tunRuntimeRadio, tunEnabledCheck, delayEdit))
 
     cancelBtn.OnEvent("Click", (*) => (state.Done := true))
     settingsGui.OnEvent("Close", (*) => (state.Done := true))
@@ -493,8 +495,8 @@ JoinLines(lines) {
     return text
 }
 
-SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoStartCheck, rememberTunCheck,
-    tunEnabledCheck, autoRestoreTunCheck, delayEdit) {
+SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoStartCheck, tunRuntimeRadio,
+    tunEnabledCheck, delayEdit) {
     corePath := Trim(coreEdit.Value)
     configPath := Trim(configEdit.Value)
     configURL := Trim(urlEdit.Value)
@@ -518,8 +520,9 @@ SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoSta
         delaySec := 600
     }
 
-    if (SaveSettingsConfig(corePath, configPath, configURL, autoStartCheck.Value = 1, rememberTunCheck.Value = 1,
-        tunEnabledCheck.Value = 1, autoRestoreTunCheck.Value = 1, delaySec)) {
+    tunControl := (tunRuntimeRadio.Value = 1) ? "runtime" : "file"
+    if (SaveSettingsConfig(corePath, configPath, configURL, autoStartCheck.Value = 1, tunControl,
+        tunEnabledCheck.Value = 1, delaySec)) {
         state.Saved := true
         state.Done := true
     }
@@ -721,7 +724,7 @@ SetupTrayMenu() {
     A_TrayMenu.Add("打开 WebUI", MenuOpenWebUI)
     A_TrayMenu.Add()  ; Separator
     A_TrayMenu.Add("启用系统代理", MenuToggleProxy)
-    A_TrayMenu.Add("启用 TUN 模式", MenuToggleTUN)
+    A_TrayMenu.Add("TUN 模式", MenuToggleTUN)
     A_TrayMenu.Add()  ; Separator
     A_TrayMenu.Add("刷新状态", MenuRefreshStatus)
 
@@ -779,9 +782,9 @@ UpdateMenuStates() {
 
     ; Update TUN checkbox
     if (IsTUNEnabled) {
-        A_TrayMenu.Check("启用 TUN 模式")
+        A_TrayMenu.Check("TUN 模式")
     } else {
-        A_TrayMenu.Uncheck("启用 TUN 模式")
+        A_TrayMenu.Uncheck("TUN 模式")
     }
 
     ; Update auto-startup checkboxes
@@ -1076,7 +1079,7 @@ RefreshAllStatus() {
 
         ; Refresh TUN state from API
         if (GetTUNStatusFromAPI()) {
-            RestoreRememberedTUNState()
+            ApplyRuntimeTUNControl()
         }
 
         ; Update menu
@@ -1336,20 +1339,19 @@ DisableSystemProxy() {
 ;==============================================================================
 ; TUN Mode Control
 ;==============================================================================
-SaveDesiredTUNState(enabled) {
-    global DesiredTUNEnabled, TUNStateConfigured, ConfigFile
+SaveRuntimeTUNState(enabled) {
+    global DesiredTUNEnabled, ConfigFile
 
     DesiredTUNEnabled := enabled
-    TUNStateConfigured := true
     try {
         IniWrite(enabled ? "1" : "0", ConfigFile, "Settings", "TUNEnabled")
     }
 }
 
-RestoreRememberedTUNState() {
-    global RememberTUN, AutoRestoreTUN, DesiredTUNEnabled, IsTUNEnabled
+ApplyRuntimeTUNControl() {
+    global TUNControl, DesiredTUNEnabled, IsTUNEnabled
 
-    if (!RememberTUN || !AutoRestoreTUN) {
+    if (TUNControl != "runtime") {
         return false
     }
 
@@ -1365,7 +1367,7 @@ RestoreRememberedTUNState() {
 }
 
 GetTUNStatusFromAPI() {
-    global IsTUNEnabled, APIController, APISecret, RememberTUN, TUNStateConfigured
+    global IsTUNEnabled, APIController, APISecret
 
     if (!IsMihomoRunning()) {
         return false
@@ -1395,9 +1397,6 @@ GetTUNStatusFromAPI() {
         ; Simple regex parsing (for production, consider using a JSON library)
         if (RegExMatch(response, '"tun":\s*\{[^}]*"enable":\s*(true|false)', &match)) {
             IsTUNEnabled := (match[1] = "true")
-            if (RememberTUN && !TUNStateConfigured) {
-                SaveDesiredTUNState(IsTUNEnabled)
-            }
             return true
         }
 
@@ -1422,7 +1421,7 @@ DisableTUNMode() {
 }
 
 SetTUNMode(enabled, remember := true, notify := true) {
-    global IsTUNEnabled, APIController, APISecret, RememberTUN
+    global IsTUNEnabled, APIController, APISecret, TUNControl
 
     ; Ensure mihomo is running
     if (!IsMihomoRunning()) {
@@ -1456,8 +1455,8 @@ SetTUNMode(enabled, remember := true, notify := true) {
 
                 ; Verify the change
                 if (GetTUNStatusFromAPI() && IsTUNEnabled = enabled) {
-                    if (remember && RememberTUN) {
-                        SaveDesiredTUNState(enabled)
+                    if (remember && TUNControl = "runtime") {
+                        SaveRuntimeTUNState(enabled)
                     }
                     UpdateMenuStates()
                     if (notify) {

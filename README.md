@@ -7,7 +7,7 @@ A tray to manage mihomo core on windows.
 - Restart/Stop mihomo core
 - Enable/Disable system proxy
 - Enable/Disable TUN mode
-- Remember and restore TUN mode without modifying mihomo config files
+- Control TUN mode at runtime without modifying mihomo config files
 - Refresh mihomo status
 - Open mihomo webui
 - Open mihomo directory
@@ -62,23 +62,22 @@ work=D:\Program\Mihomo\work.yaml
 remote config instead of the active local profile. Switching a local profile from
 the tray menu clears `ConfigURL`.
 
-## TUN state memory
+## TUN control
 
-MiTray does not write to your mihomo YAML config. TUN mode is controlled through
-mihomo's runtime API and the desired state is saved in MiTray's `config.ini`.
+MiTray does not write to your mihomo YAML config. You can choose who controls
+TUN state:
 
 ```ini
 [Settings]
-RememberTUN=1
+TUNControl=runtime
 TUNEnabled=0
-AutoRestoreTUN=1
 ```
 
-- `RememberTUN`: save the TUN state after a successful tray toggle.
-- `TUNEnabled`: the desired TUN state remembered by MiTray.
-- `AutoRestoreTUN`: re-apply the remembered TUN state after mihomo restart or
-  WebUI config reload.
+- `TUNControl=runtime`: MiTray controls TUN through mihomo's runtime API. Tray
+  toggles update `TUNEnabled`, and MiTray reapplies it after restart or WebUI
+  reload.
+- `TUNControl=file`: MiTray follows `tun.enable` from your YAML config. Tray
+  toggles are runtime-only and are not saved by MiTray.
+- `TUNEnabled`: the target TUN state when `TUNControl=runtime`.
 
-For existing `config.ini` files without `TUNEnabled`, MiTray initializes the
-remembered state from the current mihomo runtime TUN state on first successful
-API status read.
+The setup window shows this as `MiTray 运行时接管` or `跟随 YAML 的 tun.enable`.
