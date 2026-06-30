@@ -17,10 +17,40 @@ A tray to manage mihomo core on windows.
 
 1. Download the latest release from [Releases](https://github.com/tom2almighty/mitray/releases).
 2. Run `mitray.exe`.
-3. First time you run `mitray.exe`, it will create a `config.ini` in the same directory. Edit it and set the path to your mihomo executable and config file.
+3. First time you run `mitray.exe`, it will create a `config.ini` in the same directory and open the initialization window.
+4. Select the mihomo executable and a mihomo config file, then save.
 
 > [!IMPORTANT]
 > If you want to use TUN mode, you need to run `mitray.exe` as administrator.
+
+## Configuration
+
+MiTray can be configured from the tray menu:
+
+- `初始化/编辑配置`: choose the mihomo executable, local config file or remote config URL, and runtime options.
+- `选择 mihomo 配置`: switch between local mihomo config profiles.
+- `选择 mihomo 配置 > 添加配置文件...`: add another local mihomo YAML config.
+
+MiTray keeps its own settings in `config.ini` and does not modify your mihomo
+YAML config files.
+
+Local config profiles are stored in the `[Profiles]` section:
+
+```ini
+[Mihomo]
+CorePath=D:\Program\Mihomo\mihomo-windows-amd64.exe
+ActiveProfile=default
+ConfigPath=D:\Program\Mihomo\config.yaml
+; ConfigURL=https://example.com/clash/config.yaml
+
+[Profiles]
+default=D:\Program\Mihomo\config.yaml
+work=D:\Program\Mihomo\work.yaml
+```
+
+`ConfigURL` keeps the old priority: if it is set, MiTray downloads and uses the
+remote config instead of the active local profile. Switching a local profile from
+the tray menu clears `ConfigURL`.
 
 ## TUN state memory
 

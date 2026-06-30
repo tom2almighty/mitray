@@ -32,6 +32,8 @@ global CorePath := ""
 global CoreProcessName := ""
 global ConfigPath := ""
 global ConfigURL := ""
+global ActiveProfile := "default"
+global Profiles := Map()
 global APIController := ""
 global APISecret := ""
 global ProxyPort := ""
@@ -50,6 +52,7 @@ global IsTUNEnabled := false
 global IsAutoStartup := false
 global AutoStartupLevel := ""  ; "normal" 或 "admin"
 global AutoStartupMenu := 0  ; 开机自启子菜单对象
+global ProfileMenu := 0  ; mihomo 配置文件子菜单对象
 global StatusCheckTimer := 0
 global StatusTimerCallback := 0
 global TrayIconState := ""
@@ -108,17 +111,30 @@ LoadConfig() {
     ; Create default config if not exists
     if (!FileExist(ConfigFile)) {
         CreateDefaultConfig()
-        ShowNotification("首次运行", "已创建默认配置文件 config.ini`n请编辑配置文件后重新运行程序", 3)
-        Sleep(3000)  ; 等待通知显示
-        ExitApp()
     }
+
+    ReadConfigValues()
+
+    if (!IsConfigUsable()) {
+        if (!ShowSettingsGui(true)) {
+            ExitApp()
+        }
+        ReadConfigValues()
+    }
+}
+
+ReadConfigValues() {
+    global
 
     ; Read Mihomo section
     CorePath := IniRead(ConfigFile, "Mihomo", "CorePath", "")
     ConfigPath := IniRead(ConfigFile, "Mihomo", "ConfigPath", "")
     ConfigURL := IniRead(ConfigFile, "Mihomo", "ConfigURL", "")
+    ActiveProfile := IniRead(ConfigFile, "Mihomo", "ActiveProfile", "default")
+    LoadProfiles()
 
     ; Extract process name from CorePath
+    CoreProcessName := ""
     if (CorePath) {
         SplitPath(CorePath, &CoreProcessName)
     }
@@ -146,6 +162,99 @@ LoadConfig() {
     }
 }
 
+LoadProfiles() {
+    global Profiles, ConfigFile, ConfigPath, ConfigURL, ActiveProfile
+
+    Profiles := Map()
+    try {
+        section := IniRead(ConfigFile, "Profiles")
+    } catch {
+        section := ""
+    }
+    if (section) {
+        loop parse section, "`n", "`r" {
+            line := Trim(A_LoopField)
+            if (!line || !InStr(line, "=")) {
+                continue
+            }
+            parts := StrSplit(line, "=", , 2)
+            name := Trim(parts[1])
+            path := Trim(parts[2])
+            if (name && path) {
+                Profiles[name] := path
+            }
+        }
+    }
+
+    ; Backward compatibility: migrate the legacy ConfigPath into Profiles.
+    if (Profiles.Count = 0 && ConfigPath) {
+        Profiles["default"] := ConfigPath
+        ActiveProfile := "default"
+        try {
+            IniWrite("default", ConfigFile, "Mihomo", "ActiveProfile")
+            IniWrite(ConfigPath, ConfigFile, "Profiles", "default")
+        }
+    }
+
+    if (!ActiveProfile) {
+        ActiveProfile := "default"
+    }
+
+    ; Remote URL keeps the old precedence. Local profile selection is used when ConfigURL is empty.
+    if (!ConfigURL && Profiles.Has(ActiveProfile)) {
+        ConfigPath := Profiles[ActiveProfile]
+        try {
+            IniWrite(ConfigPath, ConfigFile, "Mihomo", "ConfigPath")
+        }
+    }
+}
+
+IsConfigUsable() {
+    global CorePath, ConfigPath, ConfigURL
+
+    if (!CorePath || !FileExist(CorePath)) {
+        return false
+    }
+
+    if (ConfigURL) {
+        return true
+    }
+
+    return ConfigPath && FileExist(ConfigPath)
+}
+
+SaveSettingsConfig(corePath, configPath, configURL, autoStart, rememberTun, tunEnabled, autoRestoreTun, delaySec) {
+    global ConfigFile, ActiveProfile, Profiles
+
+    if (!ActiveProfile) {
+        ActiveProfile := "default"
+    }
+
+    if (configPath) {
+        Profiles[ActiveProfile] := configPath
+    }
+
+    try {
+        IniWrite(corePath, ConfigFile, "Mihomo", "CorePath")
+        IniWrite(configPath, ConfigFile, "Mihomo", "ConfigPath")
+        IniWrite(configURL, ConfigFile, "Mihomo", "ConfigURL")
+        IniWrite(ActiveProfile, ConfigFile, "Mihomo", "ActiveProfile")
+        if (configPath) {
+            IniWrite(configPath, ConfigFile, "Profiles", ActiveProfile)
+        }
+
+        IniWrite(autoStart ? "1" : "0", ConfigFile, "Settings", "AutoStartCore")
+        IniWrite(rememberTun ? "1" : "0", ConfigFile, "Settings", "RememberTUN")
+        IniWrite(tunEnabled ? "1" : "0", ConfigFile, "Settings", "TUNEnabled")
+        IniWrite(autoRestoreTun ? "1" : "0", ConfigFile, "Settings", "AutoRestoreTUN")
+        IniWrite(delaySec, ConfigFile, "Settings", "AutoStartupDelaySec")
+        return true
+    } catch as err {
+        MsgBox("保存配置失败: " . err.Message, "MiTray", "Iconx")
+        return false
+    }
+}
+
 CreateDefaultConfig() {
     global ConfigFile
 
@@ -155,11 +264,17 @@ CreateDefaultConfig() {
 ; Path to mihomo executable (required)
 CorePath=
 
+; Active local profile name. ConfigURL still takes precedence if set.
+ActiveProfile=default
+
 ; Local config file path (optional if ConfigURL is set)
 ConfigPath=
 
 ; Remote config URL (optional, takes precedence over ConfigPath)
 ConfigURL=
+
+[Profiles]
+; default=
 
 [Settings]
 ; Auto-start mihomo on script launch (1=yes, 0=no)
@@ -179,6 +294,111 @@ AutoStartupDelaySec=15
 )"
 
     FileAppend(configContent, ConfigFile)
+}
+
+ShowSettingsGui(firstRun := false) {
+    global CorePath, ConfigPath, ConfigURL, AutoStartCore, RememberTUN, DesiredTUNEnabled, AutoRestoreTUN, AutoStartupDelaySec
+
+    state := {Done: false, Saved: false}
+    title := firstRun ? "MiTray 初始化配置" : "MiTray 配置"
+    settingsGui := Gui("+AlwaysOnTop", title)
+    settingsGui.MarginX := 14
+    settingsGui.MarginY := 14
+    settingsGui.SetFont("s9", "Microsoft YaHei UI")
+
+    settingsGui.Add("Text", "x14 y18 w120", "mihomo 核心")
+    coreEdit := settingsGui.Add("Edit", "x140 y15 w360", CorePath)
+    browseCoreBtn := settingsGui.Add("Button", "x510 y14 w70", "浏览...")
+
+    settingsGui.Add("Text", "x14 y58 w120", "配置文件")
+    configEdit := settingsGui.Add("Edit", "x140 y55 w360", ConfigPath)
+    browseConfigBtn := settingsGui.Add("Button", "x510 y54 w70", "浏览...")
+
+    settingsGui.Add("Text", "x14 y98 w120", "远程配置 URL")
+    urlEdit := settingsGui.Add("Edit", "x140 y95 w440", ConfigURL)
+
+    autoStartCheck := settingsGui.Add("Checkbox", "x140 y135 w220", "启动 MiTray 时自动启动 mihomo")
+    autoStartCheck.Value := AutoStartCore ? 1 : 0
+
+    rememberTunCheck := settingsGui.Add("Checkbox", "x140 y165 w220", "记忆 TUN 状态")
+    rememberTunCheck.Value := RememberTUN ? 1 : 0
+
+    tunEnabledCheck := settingsGui.Add("Checkbox", "x370 y165 w180", "期望 TUN 开启")
+    tunEnabledCheck.Value := DesiredTUNEnabled ? 1 : 0
+
+    autoRestoreTunCheck := settingsGui.Add("Checkbox", "x140 y195 w300", "重启或 WebUI 重载后自动恢复 TUN")
+    autoRestoreTunCheck.Value := AutoRestoreTUN ? 1 : 0
+
+    settingsGui.Add("Text", "x14 y232 w120", "自启延迟秒数")
+    delayEdit := settingsGui.Add("Edit", "x140 y229 w80 Number", AutoStartupDelaySec)
+    settingsGui.Add("UpDown", "Range0-600", AutoStartupDelaySec)
+
+    saveBtn := settingsGui.Add("Button", "x390 y275 w90 Default", "保存")
+    cancelBtn := settingsGui.Add("Button", "x490 y275 w90", firstRun ? "退出" : "取消")
+
+    browseCoreBtn.OnEvent("Click", (*) => BrowseCoreFile(coreEdit))
+    browseConfigBtn.OnEvent("Click", (*) => BrowseConfigFile(configEdit))
+
+    saveBtn.OnEvent("Click", (*) => SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit,
+        autoStartCheck, rememberTunCheck, tunEnabledCheck, autoRestoreTunCheck, delayEdit))
+
+    cancelBtn.OnEvent("Click", (*) => (state.Done := true))
+    settingsGui.OnEvent("Close", (*) => (state.Done := true))
+
+    settingsGui.Show("w600 h330")
+    while (!state.Done) {
+        Sleep(50)
+    }
+    try {
+        settingsGui.Destroy()
+    }
+    return state.Saved
+}
+
+BrowseCoreFile(coreEdit) {
+    selected := FileSelect(, coreEdit.Value, "选择 mihomo 核心", "Executable (*.exe)")
+    if (selected) {
+        coreEdit.Value := selected
+    }
+}
+
+BrowseConfigFile(configEdit) {
+    selected := FileSelect(, configEdit.Value, "选择 mihomo 配置文件", "YAML (*.yaml; *.yml)")
+    if (selected) {
+        configEdit.Value := selected
+    }
+}
+
+SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoStartCheck, rememberTunCheck,
+    tunEnabledCheck, autoRestoreTunCheck, delayEdit) {
+    corePath := Trim(coreEdit.Value)
+    configPath := Trim(configEdit.Value)
+    configURL := Trim(urlEdit.Value)
+    delayValue := Trim(delayEdit.Value)
+
+    if (!corePath || !FileExist(corePath)) {
+        MsgBox("请选择有效的 mihomo 核心文件。", "MiTray", "Iconx")
+        return
+    }
+
+    if (!configURL && (!configPath || !FileExist(configPath))) {
+        MsgBox("请选择有效的本地配置文件，或填写远程配置 URL。", "MiTray", "Iconx")
+        return
+    }
+
+    if (!RegExMatch(delayValue, "^\d+$")) {
+        delayValue := "15"
+    }
+    delaySec := delayValue + 0
+    if (delaySec > 600) {
+        delaySec := 600
+    }
+
+    if (SaveSettingsConfig(corePath, configPath, configURL, autoStartCheck.Value = 1, rememberTunCheck.Value = 1,
+        tunEnabledCheck.Value = 1, autoRestoreTunCheck.Value = 1, delaySec)) {
+        state.Saved := true
+        state.Done := true
+    }
 }
 
 ParseMihomoConfig(configPath) {
@@ -282,7 +502,7 @@ ApplyTrayIcon(state) {
 ; Tray Menu Setup
 ;==============================================================================
 SetupTrayMenu() {
-    global AutoStartupMenu
+    global AutoStartupMenu, ProfileMenu
 
     ; Remove default menu items
     A_TrayMenu.Delete()
@@ -294,6 +514,13 @@ SetupTrayMenu() {
     A_TrayMenu.Add("启用 TUN 模式", MenuToggleTUN)
     A_TrayMenu.Add()  ; Separator
     A_TrayMenu.Add("刷新状态", MenuRefreshStatus)
+
+    ; mihomo 配置文件子菜单
+    ProfileMenu := Menu()
+    BuildProfileMenu()
+    A_TrayMenu.Add("选择 mihomo 配置", ProfileMenu)
+    A_TrayMenu.Add("初始化/编辑配置", MenuOpenSettings)
+    A_TrayMenu.Add()  ; Separator
 
     ; 创建开机自启子菜单
     AutoStartupMenu := Menu()
@@ -311,6 +538,23 @@ SetupTrayMenu() {
 
     ; Update menu states
     UpdateMenuStates()
+}
+
+BuildProfileMenu() {
+    global ProfileMenu, Profiles
+
+    if (!ProfileMenu) {
+        return
+    }
+
+    for name, path in Profiles {
+        ProfileMenu.Add(name, MenuSelectProfile)
+    }
+
+    if (Profiles.Count > 0) {
+        ProfileMenu.Add()
+    }
+    ProfileMenu.Add("添加配置文件...", MenuAddProfile)
 }
 
 UpdateMenuStates() {
@@ -341,6 +585,17 @@ UpdateMenuStates() {
         } else {
             AutoStartupMenu.Uncheck("普通权限")
             AutoStartupMenu.Uncheck("管理员权限")
+        }
+    }
+
+    ; Update active profile checkbox
+    if (ProfileMenu) {
+        for name, path in Profiles {
+            if (name = ActiveProfile) {
+                ProfileMenu.Check(name)
+            } else {
+                ProfileMenu.Uncheck(name)
+            }
         }
     }
 }
@@ -398,6 +653,107 @@ MenuToggleTUN(*) {
 MenuRefreshStatus(*) {
     RefreshAllStatus()
     ShowNotification("状态刷新", "已刷新系统代理和 TUN 状态", 2)
+}
+
+MenuOpenSettings(*) {
+    wasRunning := IsMihomoRunning()
+    if (ShowSettingsGui(false)) {
+        LoadConfig()
+        SetupTrayMenu()
+        CheckAutoStartup()
+        CheckSystemProxyState()
+        if (wasRunning) {
+            ShowNotification("配置已保存", "配置已保存，重启内核后生效", 3)
+        } else {
+            ShowNotification("配置已保存", "配置已保存", 2)
+        }
+    }
+}
+
+MenuSelectProfile(itemName, *) {
+    SwitchMihomoProfile(itemName)
+}
+
+MenuAddProfile(*) {
+    global ConfigFile, Profiles, ActiveProfile, ConfigPath
+
+    selected := FileSelect(, ConfigPath, "选择 mihomo 配置文件", "YAML (*.yaml; *.yml)")
+    if (!selected) {
+        return
+    }
+
+    SplitPath(selected, , , , &baseName)
+    result := InputBox("请输入配置名称：", "添加 mihomo 配置", , baseName ? baseName : "default")
+    if (result.Result != "OK") {
+        return
+    }
+
+    profileName := Trim(result.Value)
+    profileName := RegExReplace(profileName, "[=\r\n]", "_")
+    if (!profileName) {
+        ShowNotification("错误", "配置名称不能为空", 2)
+        return
+    }
+
+    if (Profiles.Has(profileName)) {
+        ShowNotification("错误", "配置名称已存在: " . profileName, 3)
+        return
+    }
+
+    Profiles[profileName] := selected
+    try {
+        IniWrite(selected, ConfigFile, "Profiles", profileName)
+        SwitchMihomoProfile(profileName)
+    } catch as err {
+        ShowNotification("错误", "添加配置失败: " . err.Message, 3)
+    }
+}
+
+SwitchMihomoProfile(profileName) {
+    global ConfigFile, Profiles, ActiveProfile, ConfigPath, ConfigURL
+
+    if (!Profiles.Has(profileName)) {
+        ShowNotification("错误", "配置不存在: " . profileName, 2)
+        return false
+    }
+
+    if (profileName = ActiveProfile && ConfigPath = Profiles[profileName] && !ConfigURL) {
+        UpdateMenuStates()
+        return true
+    }
+
+    wasRunning := IsMihomoRunning()
+
+    ActiveProfile := profileName
+    ConfigPath := Profiles[profileName]
+    ConfigURL := ""
+
+    try {
+        IniWrite(ActiveProfile, ConfigFile, "Mihomo", "ActiveProfile")
+        IniWrite(ConfigPath, ConfigFile, "Mihomo", "ConfigPath")
+        IniWrite("", ConfigFile, "Mihomo", "ConfigURL")
+    } catch as err {
+        ShowNotification("错误", "保存配置选择失败: " . err.Message, 3)
+        return false
+    }
+
+    ParseMihomoConfig(ConfigPath)
+    SetupTrayMenu()
+
+    if (wasRunning) {
+        StopMihomo()
+        Sleep(1000)
+        if (StartMihomo()) {
+            Sleep(3000)
+            StartStatusMonitoring()
+            RefreshAllStatus()
+        }
+    } else {
+        UpdateMenuStates()
+    }
+
+    ShowNotification("配置切换", "已切换到: " . ActiveProfile, 2)
+    return true
 }
 
 MenuAutoStartupNormal(*) {
