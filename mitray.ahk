@@ -39,6 +39,10 @@ global WebUIPath := ""
 global WebUIName := ""
 global AutoStartCore := true
 global AutoStartupDelaySec := 15
+global RememberTUN := true
+global DesiredTUNEnabled := false
+global TUNStateConfigured := false
+global AutoRestoreTUN := true
 
 ; State
 global IsProxyEnabled := false
@@ -68,6 +72,7 @@ if (AutoStartCore) {
 
         ; Get initial TUN status from API before starting monitoring
         GetTUNStatusFromAPI()
+        RestoreRememberedTUNState()
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -83,6 +88,7 @@ if (AutoStartCore) {
 
         ; Get initial TUN status from API
         GetTUNStatusFromAPI()
+        RestoreRememberedTUNState()
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -119,6 +125,11 @@ LoadConfig() {
 
     ; Read Settings section
     AutoStartCore := IniRead(ConfigFile, "Settings", "AutoStartCore", "1") = "1"
+    RememberTUN := IniRead(ConfigFile, "Settings", "RememberTUN", "1") = "1"
+    tunValue := IniRead(ConfigFile, "Settings", "TUNEnabled", "__missing__")
+    TUNStateConfigured := tunValue != "__missing__"
+    DesiredTUNEnabled := TUNStateConfigured ? (tunValue = "1") : false
+    AutoRestoreTUN := IniRead(ConfigFile, "Settings", "AutoRestoreTUN", "1") = "1"
     delayValue := IniRead(ConfigFile, "Settings", "AutoStartupDelaySec", "15")
     if (RegExMatch(delayValue, "^\d+$")) {
         AutoStartupDelaySec := delayValue + 0
@@ -153,6 +164,15 @@ ConfigURL=
 [Settings]
 ; Auto-start mihomo on script launch (1=yes, 0=no)
 AutoStartCore=1
+
+; Remember and restore TUN runtime state through mihomo API (1=yes, 0=no)
+RememberTUN=1
+
+; Desired TUN state remembered by MiTray (1=enabled, 0=disabled)
+TUNEnabled=0
+
+; Re-apply remembered TUN state after mihomo restart or WebUI config reload (1=yes, 0=no)
+AutoRestoreTUN=1
 
 ; Delay (seconds) before auto-start task runs after user logon (0-600)
 AutoStartupDelaySec=15
@@ -489,7 +509,9 @@ RefreshAllStatus() {
         CheckSystemProxyState()
 
         ; Refresh TUN state from API
-        GetTUNStatusFromAPI()
+        if (GetTUNStatusFromAPI()) {
+            RestoreRememberedTUNState()
+        }
 
         ; Update menu
         UpdateMenuStates()
@@ -748,8 +770,36 @@ DisableSystemProxy() {
 ;==============================================================================
 ; TUN Mode Control
 ;==============================================================================
+SaveDesiredTUNState(enabled) {
+    global DesiredTUNEnabled, TUNStateConfigured, ConfigFile
+
+    DesiredTUNEnabled := enabled
+    TUNStateConfigured := true
+    try {
+        IniWrite(enabled ? "1" : "0", ConfigFile, "Settings", "TUNEnabled")
+    }
+}
+
+RestoreRememberedTUNState() {
+    global RememberTUN, AutoRestoreTUN, DesiredTUNEnabled, IsTUNEnabled
+
+    if (!RememberTUN || !AutoRestoreTUN) {
+        return false
+    }
+
+    if (!IsMihomoRunning()) {
+        return false
+    }
+
+    if (IsTUNEnabled = DesiredTUNEnabled) {
+        return true
+    }
+
+    return SetTUNMode(DesiredTUNEnabled, false, false)
+}
+
 GetTUNStatusFromAPI() {
-    global IsTUNEnabled, APIController, APISecret
+    global IsTUNEnabled, APIController, APISecret, RememberTUN, TUNStateConfigured
 
     if (!IsMihomoRunning()) {
         return false
@@ -779,6 +829,9 @@ GetTUNStatusFromAPI() {
         ; Simple regex parsing (for production, consider using a JSON library)
         if (RegExMatch(response, '"tun":\s*\{[^}]*"enable":\s*(true|false)', &match)) {
             IsTUNEnabled := (match[1] = "true")
+            if (RememberTUN && !TUNStateConfigured) {
+                SaveDesiredTUNState(IsTUNEnabled)
+            }
             return true
         }
 
@@ -789,66 +842,27 @@ GetTUNStatusFromAPI() {
 }
 
 EnableTUNMode() {
-    global IsTUNEnabled, APIController, APISecret
-
-    ; Ensure mihomo is running
-    if (!IsMihomoRunning()) {
-        ShowNotification("错误", "mihomo 未运行", 2)
-        return false
-    }
-
-    ; Try multiple times in case API is not ready
-    retryCount := 3
-    loop retryCount {
-        try {
-            whr := ComObject("WinHttp.WinHttpRequest.5.1")
-            whr.Open("PATCH", "http://" . APIController . "/configs", false)
-            whr.SetRequestHeader("Content-Type", "application/json")
-
-            if (APISecret) {
-                whr.SetRequestHeader("Authorization", "Bearer " . APISecret)
-            }
-
-            ; Set timeout
-            whr.SetTimeouts(1000, 1000, 3000, 3000)
-
-            whr.Send('{"tun": {"enable": true}}')
-
-            ; Check response status
-            if (whr.Status = 204 || whr.Status = 200) {
-                ; Wait a moment for change to take effect
-                Sleep(500)
-
-                ; Verify the change
-                if (GetTUNStatusFromAPI() && IsTUNEnabled) {
-                    UpdateMenuStates()
-                    ShowNotification("TUN 模式", "TUN 模式已启用", 2)
-                    return true
-                }
-            }
-        } catch {
-            ; Retry on error
-        }
-
-        ; Wait before retry
-        if (A_Index < retryCount) {
-            Sleep(1000)
-        }
-    }
-
-    if (!A_IsAdmin) {
-        ShowNotification("权限不足", "TUN 模式需要管理员权限`n请退出程序后选择「以管理员身份运行」", 3)
-    } else {
-        ShowNotification("错误", "启用 TUN 模式失败，请检查 mihomo API 是否正常", 2)
+    if (SetTUNMode(true, true, true)) {
+        return true
     }
     return false
 }
 
 DisableTUNMode() {
-    global IsTUNEnabled, APIController, APISecret
+    if (SetTUNMode(false, true, true)) {
+        return true
+    }
+    return false
+}
 
+SetTUNMode(enabled, remember := true, notify := true) {
+    global IsTUNEnabled, APIController, APISecret, RememberTUN
+
+    ; Ensure mihomo is running
     if (!IsMihomoRunning()) {
-        ShowNotification("错误", "mihomo 未运行", 2)
+        if (notify) {
+            ShowNotification("错误", "mihomo 未运行", 2)
+        }
         return false
     }
 
@@ -867,7 +881,7 @@ DisableTUNMode() {
             ; Set timeout
             whr.SetTimeouts(1000, 1000, 3000, 3000)
 
-            whr.Send('{"tun": {"enable": false}}')
+            whr.Send('{"tun": {"enable": ' . (enabled ? 'true' : 'false') . '}}')
 
             ; Check response status
             if (whr.Status = 204 || whr.Status = 200) {
@@ -875,9 +889,14 @@ DisableTUNMode() {
                 Sleep(500)
 
                 ; Verify the change
-                if (GetTUNStatusFromAPI() && !IsTUNEnabled) {
+                if (GetTUNStatusFromAPI() && IsTUNEnabled = enabled) {
+                    if (remember && RememberTUN) {
+                        SaveDesiredTUNState(enabled)
+                    }
                     UpdateMenuStates()
-                    ShowNotification("TUN 模式", "TUN 模式已禁用", 2)
+                    if (notify) {
+                        ShowNotification("TUN 模式", enabled ? "TUN 模式已启用" : "TUN 模式已禁用", 2)
+                    }
                     return true
                 }
             }
@@ -891,7 +910,13 @@ DisableTUNMode() {
         }
     }
 
-    ShowNotification("错误", "禁用 TUN 模式失败，请检查 mihomo API 是否正常", 3)
+    if (!A_IsAdmin && enabled) {
+        if (notify) {
+            ShowNotification("权限不足", "TUN 模式需要管理员权限`n请退出程序后选择「以管理员身份运行」", 3)
+        }
+    } else if (notify) {
+        ShowNotification("错误", (enabled ? "启用" : "禁用") . " TUN 模式失败，请检查 mihomo API 是否正常", 2)
+    }
     return false
 }
 
