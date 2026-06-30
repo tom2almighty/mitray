@@ -300,7 +300,7 @@ ShowSettingsGui(firstRun := false) {
     global CorePath, ConfigPath, ConfigURL, AutoStartCore, RememberTUN, DesiredTUNEnabled, AutoRestoreTUN, AutoStartupDelaySec
 
     state := {Done: false, Saved: false}
-    title := firstRun ? "MiTray 初始化配置" : "MiTray 配置"
+    title := firstRun ? "MiTray 首次设置" : "MiTray 设置"
     settingsGui := Gui("+AlwaysOnTop", title)
     settingsGui.MarginX := 14
     settingsGui.MarginY := 14
@@ -310,7 +310,7 @@ ShowSettingsGui(firstRun := false) {
     coreEdit := settingsGui.Add("Edit", "x140 y15 w360", CorePath)
     browseCoreBtn := settingsGui.Add("Button", "x510 y14 w70", "浏览...")
 
-    settingsGui.Add("Text", "x14 y58 w120", "配置文件")
+    settingsGui.Add("Text", "x14 y58 w120", "本地配置文件")
     configEdit := settingsGui.Add("Edit", "x140 y55 w360", ConfigPath)
     browseConfigBtn := settingsGui.Add("Button", "x510 y54 w70", "浏览...")
 
@@ -333,8 +333,10 @@ ShowSettingsGui(firstRun := false) {
     delayEdit := settingsGui.Add("Edit", "x140 y229 w80 Number", AutoStartupDelaySec)
     settingsGui.Add("UpDown", "Range0-600", AutoStartupDelaySec)
 
-    saveBtn := settingsGui.Add("Button", "x390 y275 w90 Default", "保存")
-    cancelBtn := settingsGui.Add("Button", "x490 y275 w90", firstRun ? "退出" : "取消")
+    settingsGui.Add("Text", "x140 y258 w440 c666666", "本地配置文件和远程配置 URL 填一个即可；如果都填写，远程 URL 优先。")
+
+    saveBtn := settingsGui.Add("Button", "x390 y292 w90 Default", "保存")
+    cancelBtn := settingsGui.Add("Button", "x490 y292 w90", firstRun ? "退出" : "取消")
 
     browseCoreBtn.OnEvent("Click", (*) => BrowseCoreFile(coreEdit))
     browseConfigBtn.OnEvent("Click", (*) => BrowseConfigFile(configEdit))
@@ -345,7 +347,7 @@ ShowSettingsGui(firstRun := false) {
     cancelBtn.OnEvent("Click", (*) => (state.Done := true))
     settingsGui.OnEvent("Close", (*) => (state.Done := true))
 
-    settingsGui.Show("w600 h330")
+    settingsGui.Show("w600 h350")
     while (!state.Done) {
         Sleep(50)
     }
@@ -382,7 +384,7 @@ SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoSta
     }
 
     if (!configURL && (!configPath || !FileExist(configPath))) {
-        MsgBox("请选择有效的本地配置文件，或填写远程配置 URL。", "MiTray", "Iconx")
+        MsgBox("请在「本地配置文件」和「远程配置 URL」中至少填写一个。", "MiTray", "Iconx")
         return
     }
 
@@ -519,7 +521,7 @@ SetupTrayMenu() {
     ProfileMenu := Menu()
     BuildProfileMenu()
     A_TrayMenu.Add("选择 mihomo 配置", ProfileMenu)
-    A_TrayMenu.Add("初始化/编辑配置", MenuOpenSettings)
+    A_TrayMenu.Add("MiTray 设置...", MenuOpenSettings)
     A_TrayMenu.Add()  ; Separator
 
     ; 创建开机自启子菜单
