@@ -34,6 +34,16 @@ MiTray can be configured from the tray menu:
 MiTray keeps its own settings in `config.ini` and does not modify your mihomo
 YAML config files.
 
+The settings window shows parsed mihomo fields from the selected local YAML
+config and provides a `测试配置` button. MiTray reads only the top-level scalar
+fields it needs:
+
+- `external-controller`
+- `secret`
+- `mixed-port` / `port`
+- `external-ui`
+- `external-ui-name`
+
 Local config profiles are stored in the `[Profiles]` section:
 
 ```ini

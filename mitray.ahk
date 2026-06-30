@@ -335,11 +335,19 @@ ShowSettingsGui(firstRun := false) {
 
     settingsGui.Add("Text", "x140 y258 w440 c666666", "本地配置文件和远程配置 URL 填一个即可；如果都填写，远程 URL 优先。")
 
-    saveBtn := settingsGui.Add("Button", "x390 y292 w90 Default", "保存")
-    cancelBtn := settingsGui.Add("Button", "x490 y292 w90", firstRun ? "退出" : "取消")
+    settingsGui.Add("Text", "x14 y292 w120", "解析结果")
+    previewEdit := settingsGui.Add("Edit", "x140 y289 w440 h105 Multi ReadOnly -Wrap +VScroll")
 
-    browseCoreBtn.OnEvent("Click", (*) => BrowseCoreFile(coreEdit))
-    browseConfigBtn.OnEvent("Click", (*) => BrowseConfigFile(configEdit))
+    testBtn := settingsGui.Add("Button", "x140 y410 w100", "测试配置")
+    saveBtn := settingsGui.Add("Button", "x390 y410 w90 Default", "保存")
+    cancelBtn := settingsGui.Add("Button", "x490 y410 w90", firstRun ? "退出" : "取消")
+
+    browseCoreBtn.OnEvent("Click", (*) => BrowseCoreFileAndPreview(coreEdit, previewEdit, configEdit, urlEdit))
+    browseConfigBtn.OnEvent("Click", (*) => BrowseConfigFileAndPreview(configEdit, previewEdit, coreEdit, urlEdit))
+    coreEdit.OnEvent("Change", (*) => UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit))
+    configEdit.OnEvent("Change", (*) => UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit))
+    urlEdit.OnEvent("Change", (*) => UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit))
+    testBtn.OnEvent("Click", (*) => UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit, true))
 
     saveBtn.OnEvent("Click", (*) => SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit,
         autoStartCheck, rememberTunCheck, tunEnabledCheck, autoRestoreTunCheck, delayEdit))
@@ -347,7 +355,9 @@ ShowSettingsGui(firstRun := false) {
     cancelBtn.OnEvent("Click", (*) => (state.Done := true))
     settingsGui.OnEvent("Close", (*) => (state.Done := true))
 
-    settingsGui.Show("w600 h350")
+    UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit)
+
+    settingsGui.Show("w600 h465")
     while (!state.Done) {
         Sleep(50)
     }
@@ -364,11 +374,123 @@ BrowseCoreFile(coreEdit) {
     }
 }
 
+BrowseCoreFileAndPreview(coreEdit, previewEdit, configEdit, urlEdit) {
+    BrowseCoreFile(coreEdit)
+    UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit)
+}
+
 BrowseConfigFile(configEdit) {
     selected := FileSelect(, configEdit.Value, "选择 mihomo 配置文件", "YAML (*.yaml; *.yml)")
     if (selected) {
         configEdit.Value := selected
     }
+}
+
+BrowseConfigFileAndPreview(configEdit, previewEdit, coreEdit, urlEdit) {
+    BrowseConfigFile(configEdit)
+    UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit)
+}
+
+UpdateSettingsPreview(previewEdit, coreEdit, configEdit, urlEdit, testAPI := false) {
+    corePath := Trim(coreEdit.Value)
+    configPath := Trim(configEdit.Value)
+    configURL := Trim(urlEdit.Value)
+
+    lines := []
+
+    if (corePath && FileExist(corePath)) {
+        lines.Push("核心: OK")
+    } else if (corePath) {
+        lines.Push("核心: 文件不存在")
+    } else {
+        lines.Push("核心: 未选择")
+    }
+
+    if (configURL) {
+        lines.Push("远程配置: 已填写，将优先使用")
+    } else {
+        lines.Push("远程配置: 未填写")
+    }
+
+    parsed := 0
+    if (configPath) {
+        if (!FileExist(configPath)) {
+            lines.Push("本地配置: 文件不存在")
+        } else {
+            try {
+                parsed := ReadMihomoConfig(configPath)
+                lines.Push("本地配置: OK")
+                lines.Push("API: " . DisplayConfigValue(parsed.Controller))
+                lines.Push("代理端口: " . DisplayConfigValue(parsed.ProxyPort))
+                lines.Push("WebUI: " . BuildWebUIDisplay(parsed))
+                if (!parsed.Controller) {
+                    lines.Push("提示: 未解析到 external-controller")
+                }
+                if (!parsed.ProxyPort) {
+                    lines.Push("提示: 未解析到 mixed-port/port")
+                }
+            } catch as err {
+                lines.Push("本地配置: 读取失败 - " . err.Message)
+            }
+        }
+    } else {
+        lines.Push("本地配置: 未选择")
+    }
+
+    if (testAPI) {
+        if (parsed && parsed.Controller) {
+            result := TestMihomoAPI(parsed.Controller, parsed.Secret)
+            lines.Push("API 测试: " . result)
+        } else if (configURL) {
+            lines.Push("API 测试: 远程配置需要核心启动后解析")
+        } else {
+            lines.Push("API 测试: 缺少 external-controller")
+        }
+    }
+
+    previewEdit.Value := JoinLines(lines)
+}
+
+DisplayConfigValue(value) {
+    return value ? value : "未解析到"
+}
+
+BuildWebUIDisplay(parsed) {
+    if (!parsed.WebUIPath && !parsed.WebUIName) {
+        return "未解析到"
+    }
+
+    path := parsed.WebUIPath
+    if (parsed.WebUIName) {
+        path .= path ? "/" . parsed.WebUIName : parsed.WebUIName
+    }
+    return path
+}
+
+TestMihomoAPI(controller, secret) {
+    try {
+        whr := ComObject("WinHttp.WinHttpRequest.5.1")
+        whr.Open("GET", "http://" . controller . "/configs", false)
+        if (secret) {
+            whr.SetRequestHeader("Authorization", "Bearer " . secret)
+        }
+        whr.SetTimeouts(1000, 1000, 2000, 2000)
+        whr.Send()
+        if (whr.Status = 200) {
+            return "OK"
+        }
+        return "失败 HTTP " . whr.Status
+    } catch as err {
+        return "无法连接 - " . err.Message
+    }
+}
+
+JoinLines(lines) {
+    text := ""
+    for line in lines {
+        text .= (text ? "`r`n" : "") . line
+    }
+    return text
 }
 
 SaveSettingsGuiValues(settingsGui, state, coreEdit, configEdit, urlEdit, autoStartCheck, rememberTunCheck,
@@ -407,42 +529,128 @@ ParseMihomoConfig(configPath) {
     global APIController, APISecret, ProxyPort, WebUIPath, WebUIName
 
     try {
-        ; Reset parsed values to avoid stale state when keys are removed.
+        parsed := ReadMihomoConfig(configPath)
+        APIController := parsed.Controller
+        APISecret := parsed.Secret
+        ProxyPort := parsed.ProxyPort
+        WebUIPath := parsed.WebUIPath
+        WebUIName := parsed.WebUIName
+    } catch {
         APIController := ""
         APISecret := ""
         ProxyPort := ""
         WebUIPath := ""
         WebUIName := ""
-
-        content := FileRead(configPath)
-
-        ; Parse external-controller (keep as full address)
-        if (RegExMatch(content, "im)^\s*external-controller\s*:\s*([^\r\n]+)$", &match)) {
-            APIController := RegExReplace(Trim(match[1]), "\s+#.*$")
-        }
-
-        ; Parse secret
-        if (RegExMatch(content, "im)^\s*secret\s*:\s*([^\r\n]+)$", &match)) {
-            APISecret := RegExReplace(Trim(match[1]), "\s+#.*$")
-        }
-
-        ; Parse external-ui (local path)
-        if (RegExMatch(content, "im)^\s*external-ui\s*:\s*([^\r\n]+)$", &match)) {
-            WebUIPath := RegExReplace(Trim(match[1]), "\s+#.*$")
-        }
-
-        ; Parse external-ui-name (folder name)
-        if (RegExMatch(content, "im)^\s*external-ui-name\s*:\s*([^\r\n]+)$", &match)) {
-            WebUIName := RegExReplace(Trim(match[1]), "\s+#.*$")
-        }
-
-        ; Parse proxy port (try mixed-port first, then port)
-        if (RegExMatch(content, "im)^\s*mixed-port\s*:\s*(?:\x22|')?(\d+)(?:\x22|')?\s*(?:#.*)?$", &match)) {
-            ProxyPort := match[1]
-        } else if (RegExMatch(content, "im)^\s*port\s*:\s*(?:\x22|')?(\d+)(?:\x22|')?\s*(?:#.*)?$", &match)) {
-            ProxyPort := match[1]
-        }
     }
+}
+
+ReadMihomoConfig(configPath) {
+    content := FileRead(configPath)
+    proxyPort := ReadTopLevelYamlValue(content, "mixed-port")
+    if (!proxyPort) {
+        proxyPort := ReadTopLevelYamlValue(content, "port")
+    }
+
+    return {
+        Controller: ReadTopLevelYamlValue(content, "external-controller"),
+        Secret: ReadTopLevelYamlValue(content, "secret"),
+        ProxyPort: proxyPort,
+        WebUIPath: ReadTopLevelYamlValue(content, "external-ui"),
+        WebUIName: ReadTopLevelYamlValue(content, "external-ui-name")
+    }
+}
+
+ReadTopLevelYamlValue(content, key) {
+    loop parse content, "`n", "`r" {
+        line := A_LoopField
+        if (!line || RegExMatch(line, "^\s+#")) {
+            continue
+        }
+
+        ; Only read top-level scalar keys. Nested YAML is intentionally ignored.
+        if (RegExMatch(line, "^\s")) {
+            continue
+        }
+
+        if (!RegExMatch(line, "^" . key . "\s*:\s*(.*)$", &match)) {
+            continue
+        }
+
+        value := Trim(match[1])
+        if (value = "") {
+            return ""
+        }
+
+        return NormalizeYamlScalar(value)
+    }
+
+    return ""
+}
+
+NormalizeYamlScalar(value) {
+    value := Trim(value)
+
+    if (SubStr(value, 1, 1) = '"' || SubStr(value, 1, 1) = "'") {
+        quote := SubStr(value, 1, 1)
+        return ReadQuotedYamlScalar(value, quote)
+    }
+
+    value := StripYamlComment(value)
+    return Trim(value)
+}
+
+ReadQuotedYamlScalar(value, quote) {
+    result := ""
+    escaped := false
+    body := SubStr(value, 2)
+
+    loop parse body {
+        ch := A_LoopField
+        if (quote = '"' && escaped) {
+            switch ch {
+                case "n":
+                    result .= "`n"
+                case "r":
+                    result .= "`r"
+                case "t":
+                    result .= "`t"
+                default:
+                    result .= ch
+            }
+            escaped := false
+            continue
+        }
+
+        if (quote = '"' && ch = "\") {
+            escaped := true
+            continue
+        }
+
+        if (ch = quote) {
+            return result
+        }
+
+        result .= ch
+    }
+
+    ; If the quote is not closed, fall back to the trimmed unquoted body.
+    return Trim(SubStr(value, 2))
+}
+
+StripYamlComment(value) {
+    inSpace := false
+
+    loop parse value {
+        ch := A_LoopField
+        if (ch = "#") {
+            if (A_Index = 1 || inSpace) {
+                return RTrim(SubStr(value, 1, A_Index - 1))
+            }
+        }
+        inSpace := ch = " " || ch = "`t"
+    }
+
+    return value
 }
 
 UpdateTrayIcon() {
