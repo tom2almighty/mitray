@@ -68,12 +68,13 @@ CheckSystemProxyState()  ; Check current system proxy state
 ; Auto-start mihomo if configured
 if (AutoStartCore) {
     if (StartMihomo()) {
-        ; Wait for core to be fully ready
-        Sleep(3000)
+        ; 等待核心及 API 就绪
+        WaitForAPIReady(15)
 
-        ; Get initial TUN status from API before starting monitoring
-        GetTUNStatusFromAPI()
-        ApplyRuntimeTUNControl()
+        ; 仅从 API 同步当前 TUN 真实状态，不在启动时强行覆盖，保留核心原始配置与网卡参数
+        if (GetTUNStatusFromAPI()) {
+            DesiredTUNEnabled := IsTUNEnabled
+        }
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -87,9 +88,11 @@ if (AutoStartCore) {
         MihomoProcess := ProcessExist(CoreProcessName)
         ShowNotification("检测到运行", "检测到 mihomo 已在运行", 2)
 
-        ; Get initial TUN status from API
-        GetTUNStatusFromAPI()
-        ApplyRuntimeTUNControl()
+        ; 等待并同步当前 TUN 状态
+        WaitForAPIReady(5)
+        if (GetTUNStatusFromAPI()) {
+            DesiredTUNEnabled := IsTUNEnabled
+        }
 
         ; Update menu to reflect current state
         UpdateMenuStates()
@@ -1077,9 +1080,9 @@ RefreshAllStatus() {
         ; Refresh system proxy state
         CheckSystemProxyState()
 
-        ; Refresh TUN state from API
+        ; Refresh TUN state from API (只做检测同步，不主动覆盖)
         if (GetTUNStatusFromAPI()) {
-            ApplyRuntimeTUNControl()
+            DesiredTUNEnabled := IsTUNEnabled
         }
 
         ; Update menu
@@ -1339,6 +1342,40 @@ DisableSystemProxy() {
 ;==============================================================================
 ; TUN Mode Control
 ;==============================================================================
+WaitForAPIReady(maxWaitSec := 15) {
+    global APIController, APISecret
+
+    if (!APIController) {
+        Sleep(2000)
+        return false
+    }
+
+    endTime := A_TickCount + (maxWaitSec * 1000)
+    while (A_TickCount < endTime) {
+        if (!IsMihomoRunning()) {
+            return false
+        }
+
+        try {
+            whr := ComObject("WinHttp.WinHttpRequest.5.1")
+            whr.Open("GET", "http://" . APIController . "/configs", false)
+            if (APISecret) {
+                whr.SetRequestHeader("Authorization", "Bearer " . APISecret)
+            }
+            whr.SetTimeouts(500, 500, 1000, 1000)
+            whr.Send()
+            if (whr.Status = 200) {
+                return true
+            }
+        } catch {
+        }
+
+        Sleep(500)
+    }
+
+    return false
+}
+
 SaveRuntimeTUNState(enabled) {
     global DesiredTUNEnabled, ConfigFile
 
@@ -1394,7 +1431,6 @@ GetTUNStatusFromAPI() {
         response := whr.ResponseText
 
         ; Parse JSON response to get TUN status
-        ; Simple regex parsing (for production, consider using a JSON library)
         if (RegExMatch(response, '"tun":\s*\{[^}]*"enable":\s*(true|false)', &match)) {
             IsTUNEnabled := (match[1] = "true")
             return true
@@ -1404,6 +1440,87 @@ GetTUNStatusFromAPI() {
     } catch {
         return false
     }
+}
+
+; 从 JSON 中提取完整的 "tun": { ... } 对象，以便保留全部原始配置（网卡名、DNS、路由等）
+ExtractTunJsonObject(jsonText) {
+    if (!RegExMatch(jsonText, 'i"tun"\s*:\s*\{', &match)) {
+        return ""
+    }
+
+    startPos := InStr(jsonText, "{", , match.Pos)
+    if (!startPos) {
+        return ""
+    }
+
+    len := StrLen(jsonText)
+    depth := 0
+    inString := false
+    escaped := false
+
+    pos := startPos
+    while (pos <= len) {
+        ch := SubStr(jsonText, pos, 1)
+
+        if (inString) {
+            if (escaped) {
+                escaped := false
+            } else if (ch = "\") {
+                escaped := true
+            } else if (ch = '"') {
+                inString := false
+            }
+        } else {
+            if (ch = '"') {
+                inString := true
+            } else if (ch = "{") {
+                depth++
+            } else if (ch = "}") {
+                depth--
+                if (depth = 0) {
+                    return SubStr(jsonText, startPos, pos - startPos + 1)
+                }
+            }
+        }
+        pos++
+    }
+
+    return ""
+}
+
+; 构造带完整上下文的 TUN PATCH payload，防止覆盖导致网卡退化为 Meta
+BuildTunPatchPayload(enabled) {
+    global APIController, APISecret
+
+    tunJson := ""
+    try {
+        whr := ComObject("WinHttp.WinHttpRequest.5.1")
+        whr.Open("GET", "http://" . APIController . "/configs", false)
+        if (APISecret) {
+            whr.SetRequestHeader("Authorization", "Bearer " . APISecret)
+        }
+        whr.SetTimeouts(1000, 1000, 2000, 2000)
+        whr.Send()
+        if (whr.Status = 200) {
+            tunJson := ExtractTunJsonObject(whr.ResponseText)
+        }
+    } catch {
+    }
+
+    targetVal := enabled ? "true" : "false"
+
+    ; 如果从 API 获取到了完整的 tun 对象，保留原有的全部参数（device, stack, auto-route 等），仅修改 enable 状态
+    if (tunJson) {
+        if (RegExMatch(tunJson, 'i"enable"\s*:\s*(true|false)')) {
+            updatedTun := RegExReplace(tunJson, 'i("enable"\s*:\s*)(true|false)', '$1' . targetVal)
+        } else {
+            updatedTun := RegExReplace(tunJson, '^\s*\{', '{"enable": ' . targetVal . ', ')
+        }
+        return '{"tun": ' . updatedTun . '}'
+    }
+
+    ; 备用降级
+    return '{"tun": {"enable": ' . targetVal . '}}'
 }
 
 EnableTUNMode() {
@@ -1421,7 +1538,7 @@ DisableTUNMode() {
 }
 
 SetTUNMode(enabled, remember := true, notify := true) {
-    global IsTUNEnabled, APIController, APISecret, TUNControl
+    global IsTUNEnabled, APIController, APISecret, TUNControl, DesiredTUNEnabled
 
     ; Ensure mihomo is running
     if (!IsMihomoRunning()) {
@@ -1430,6 +1547,9 @@ SetTUNMode(enabled, remember := true, notify := true) {
         }
         return false
     }
+
+    ; 构造保留完整网卡名与路由参数的 payload
+    payload := BuildTunPatchPayload(enabled)
 
     ; Try multiple times in case API is not ready
     retryCount := 3
@@ -1446,7 +1566,7 @@ SetTUNMode(enabled, remember := true, notify := true) {
             ; Set timeout
             whr.SetTimeouts(1000, 1000, 3000, 3000)
 
-            whr.Send('{"tun": {"enable": ' . (enabled ? 'true' : 'false') . '}}')
+            whr.Send(payload)
 
             ; Check response status
             if (whr.Status = 204 || whr.Status = 200) {
@@ -1457,6 +1577,8 @@ SetTUNMode(enabled, remember := true, notify := true) {
                 if (GetTUNStatusFromAPI() && IsTUNEnabled = enabled) {
                     if (remember && TUNControl = "runtime") {
                         SaveRuntimeTUNState(enabled)
+                    } else {
+                        DesiredTUNEnabled := enabled
                     }
                     UpdateMenuStates()
                     if (notify) {
@@ -1575,6 +1697,7 @@ EnableAutoStartup(level := "normal") {
             . '`r`n  <Actions Context="Author">'
             . '`r`n    <Exec>'
             . '`r`n      <Command>' . exePathEscaped . '</Command>'
+            . '`r`n      <WorkingDirectory>' . XmlEscape(A_ScriptDir) . '</WorkingDirectory>'
             . '`r`n    </Exec>'
             . '`r`n  </Actions>'
             . '`r`n</Task>'
