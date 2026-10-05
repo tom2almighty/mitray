@@ -1,22 +1,87 @@
-# mitray
+# MiTray
 
-A tray to manage mihomo core on windows.
+Windows 上的轻量 mihomo 托盘控制器，使用 Go 和 Windows 原生控件编写。
 
-## Features
+> [!NOTE]
+> 使用 Golang 重写，二进制文件和内存占用 10MB 左右。
+> v1.0.15 版本为 AHK 最后版本，不再维护。
 
-- Restart/Stop mihomo core
-- Enable/Disable system proxy
-- Enable/Disable TUN mode
-- Refresh mihomo status
-- Open mihomo webui
-- Open mihomo directory
-- Auto start on startup (or with administrator)
 
-## Usage
+## 使用
 
-1. Download the latest release from [Releases](https://github.com/tom2almighty/mitray/releases).
-2. Run `mitray.exe`.
-3. First time you run `mitray.exe`, it will create a `config.ini` in the same directory. Edit it and set the path to your mihomo executable and config file.
+1. 将 `mitray.exe` 放在可写文件夹中运行。
+2. 首次打开时，在设置面板选择 mihomo 核心，以及本地 YAML 文件或远程配置 URL。
+3. 点击「保存并应用」。左键托盘图标打开设置，右键打开快捷菜单。
+4. 需要 TUN 时，让 mihomo 以管理员权限运行。可点击「以管理员身份重启」，重新启动 MiTray 和所选核心，再设置「管理员权限」开机自启。
 
-> [!IMPORTANT]
-> If you want to use TUN mode, you need to run `mitray.exe` as administrator.
+设置面板保留核心选择、本地配置列表、远程 URL、自动启动核心及开机自启延迟。修改核心或配置后保存，会重启正在运行的核心；修改自启等其他选项不会重启核心。没有配置检测或解析预览面板。
+
+关闭设置窗口后继续在托盘运行。「退出 MiTray」保留核心及系统代理；「停止核心并退出」停止核心。停止核心不会自动关闭系统代理。
+
+## TUN 行为
+
+- **从未选择过**：遵循 mihomo YAML 的 `tun.enable`。
+- **托盘或设置面板成功切换后**：保存这个开关，下次启动、重启核心或通过 MiTray 切换配置时恢复。
+- **只修改开关**：发送 `PATCH /configs`，请求体仅为 `{"tun":{"enable":true}}` 或 `false`。网卡名、协议栈、DNS 和路由参数继续由 mihomo 配置提供。
+- **独立开关**：系统代理与 TUN 可以同时启用；切换一项不会自动修改另一项。
+- **刷新只读**：定时刷新和手动刷新不修改 TUN，不会与 WebUI 的临时调整争夺控制权。WebUI 重载不会触发强制恢复；下次由 MiTray 启动或重启核心时恢复记忆。
+- **失败不覆盖记忆**：只有回读确认成功才保存；保存失败会单独提示。API 不可达时显示「未知」。
+- **回到 YAML**：托盘菜单「清除 TUN 记忆」仅清除记录，下次启动核心时遵循配置文件。
+
+MiTray 不修改原始 YAML。当前采用启动后 API 恢复：如果 YAML 开启 TUN、记忆为关闭，启动期间可能短暂开启 TUN，API 就绪后关闭。启动恢复及操作重试有期限，超时会提示并保留记忆，不进行无限强制重试。
+
+## 配置与升级
+
+程序目录中的 `config.ini` 保存 MiTray 设置，支持旧版 AHK 的 UTF-8/UTF-16 配置。升级时将新 EXE 放回原程序目录，保留原来的 `config.ini`，先退出旧版 MiTray。
+
+旧版明确保存的 `TUNEnabled` 会迁移；旧版 `TUNControl=file` 或 `RememberTUN=0` 不导入 TUN 记忆。v1.0.15 没有记忆字段时，保持「跟随 YAML」。已有自启任务会被读取；保存自启设置后更新为 Go 程序的启动方式。
+
+```ini
+[Mihomo]
+CorePath=D:\Program\Mihomo\mihomo.exe
+ConfigPath=D:\Program\Mihomo\config.yaml
+ConfigURL=
+ActiveProfile=default
+
+[Profiles]
+default=D:\Program\Mihomo\config.yaml
+
+[Settings]
+AutoStartCore=1
+AutoStartupDelaySec=15
+AutoStartupLevel=off
+
+[State]
+Schema=1
+; 不存在 TUNEnabled 表示没有覆盖 YAML
+; TUNEnabled=1
+```
+
+相对路径以 MiTray 所在目录为基准。核心的工作目录和 `-d` 均使用核心所在目录，与 v1.0.15 一致。本地配置直接交给核心，MiTray 只读取连接 API 和系统代理所需的字段。
+
+远程配置按 URL 分别缓存在 `cache/` 中；网络不可用时使用已有缓存，不提前删除缓存。首次使用的 URL 没有缓存时，需要联网下载。远程 URL 和本地配置同时填写时兼容旧版行为，URL 优先；在面板或托盘选择本地配置会清除 URL。
+
+## 错误提示
+
+MiTray 不生成日志文件，也不保存 mihomo 的核心输出。启动和操作错误直接在设置面板或通知中提示；mihomo 的日志通过 WebUI 查看。
+
+## 构建
+
+需要 Go 1.24 或更新版本。Windows amd64：
+
+```powershell
+.\build.ps1 -Version 2.0.0-dev
+```
+
+生成 `dist/mitray.exe`，内嵌三种托盘图标、Windows 控件样式和 DPI manifest。构建不启动 mihomo。
+
+也可以在 Linux/macOS 交叉编译：
+
+```sh
+go run ./tools/resources -arch amd64
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+  -ldflags '-H windowsgui -s -w -X main.version=2.0.0-dev' \
+  -o dist/mitray.exe ./cmd/mitray
+```
+
+GitHub Actions 在推送和拉取请求时编译 Windows EXE；推送 `v*` tag 时附加到 Release。

@@ -1,1 +1,6 @@
 *.exe
+*.syso
+/dist/
+/cache/
+*.log
+*.log.1
