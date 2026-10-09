@@ -28,6 +28,9 @@ type System interface {
 
 type SettingsStore interface{ Save(config.Settings) error }
 
+// ErrTUNRestore allows background recovery failures to notify the user once.
+var ErrTUNRestore = errors.New("恢复 TUN 启动记忆失败，本次核心运行期间不再自动重试")
+
 type Snapshot struct {
 	Settings   config.Settings
 	Running    bool
@@ -37,8 +40,9 @@ type Snapshot struct {
 	Notice     string
 }
 
-// All mutations (including lifecycle operations) share op. Polling never writes
-// TUN or its preference. UI reads use a separate lock and cannot block on HTTP.
+// All mutations (including lifecycle operations and recovery) share op.
+// Polling only restores newly detected processes and never changes the preference.
+// UI reads use a separate lock and cannot block on HTTP.
 type Controller struct {
 	op                          sync.Mutex
 	viewMu                      sync.RWMutex
@@ -49,6 +53,7 @@ type Controller struct {
 	core                        Core
 	system                      System
 	pid                         int
+	tunHandledPID               int
 	activeExe                   string
 	client                      *mihomo.Client
 	tun, proxy                  *bool
@@ -148,8 +153,10 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 	if err != nil {
 		return err
 	}
+	newProcess := pid == 0
 	if pid != 0 {
 		c.pid, c.activeExe = pid, exe
+		c.tunHandledPID = pid // Connecting to a running core must preserve its state.
 	}
 	var src source
 	if prepared != nil {
@@ -173,12 +180,30 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 		}
 	}
 	c.pid, c.tun = pid, nil
+	c.tunHandledPID = pid
 	c.publish()
+	if newProcess && c.cfg.TUNEnabled != nil {
+		return c.restoreTUN(ctx)
+	}
+	return c.waitReady(ctx)
+}
+
+func (c *Controller) restoreTUN(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w: %w", ErrTUNRestore, err)
+		}
+	}()
 	if err := c.waitReady(ctx); err != nil {
 		return err
 	}
-	if c.cfg.TUNEnabled != nil {
-		return c.applyTUN(ctx, *c.cfg.TUNEnabled)
+	return c.applyTUN(ctx, *c.cfg.TUNEnabled)
+}
+
+func (c *Controller) checkCore() error {
+	if !c.core.Alive(c.pid, c.activeExe) {
+		c.pid, c.tun = 0, nil
+		return errors.New("核心进程已退出或变化，已取消当前操作")
 	}
 	return nil
 }
@@ -199,9 +224,8 @@ func (c *Controller) waitReady(ctx context.Context) error {
 	defer cancel()
 	var last error
 	for {
-		if !c.core.Alive(c.pid, c.activeExe) {
-			c.pid, c.tun = 0, nil
-			return errors.New("mihomo 已退出，请检查配置文件和运行权限")
+		if err := c.checkCore(); err != nil {
+			return err
 		}
 		status, err := c.client.Status(ctx)
 		if err == nil {
@@ -210,7 +234,7 @@ func (c *Controller) waitReady(ctx context.Context) error {
 		}
 		last = err
 		if err := pause(ctx, c.retryInterval); err != nil {
-			return fmt.Errorf("等待核心 API 就绪超时；TUN 记忆已保留，可重启核心重试: %w", last)
+			return fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
 		}
 	}
 }
@@ -236,7 +260,7 @@ func (c *Controller) stop() error {
 			return fmt.Errorf("停止 mihomo: %w", err)
 		}
 	}
-	c.pid, c.tun = 0, nil
+	c.pid, c.tun, c.tunHandledPID = 0, nil, 0
 	c.notice = ""
 	return nil
 }
@@ -285,6 +309,7 @@ func (c *Controller) Refresh(ctx context.Context) error {
 	defer c.op.Unlock()
 	defer c.publish()
 	c.readProxy()
+	restore := false
 	if c.pid != 0 && !c.core.Alive(c.pid, c.activeExe) {
 		c.pid, c.tun = 0, nil
 	}
@@ -300,7 +325,11 @@ func (c *Controller) Refresh(ctx context.Context) error {
 		if pid == 0 {
 			return nil
 		}
-		c.pid, c.activeExe = pid, exe
+		restore = c.tunHandledPID != pid && c.cfg.TUNEnabled != nil
+		c.pid, c.activeExe, c.tun = pid, exe, nil
+		// Consume recovery before any I/O so a failure cannot rearm it on refresh.
+		c.tunHandledPID = pid
+		c.publish()
 		if c.client != nil {
 			c.client.Close()
 			c.client = nil
@@ -309,9 +338,15 @@ func (c *Controller) Refresh(ctx context.Context) error {
 	if c.client == nil {
 		src, err := prepareSource(ctx, c.base, c.cfg, true)
 		if err != nil {
+			if restore {
+				return fmt.Errorf("%w: %w", ErrTUNRestore, err)
+			}
 			return err
 		}
 		c.setClient(src.connection)
+	}
+	if restore {
+		return c.restoreTUN(ctx)
 	}
 	s, err := c.client.Status(ctx)
 	if err != nil {
@@ -355,6 +390,9 @@ func (c *Controller) ToggleTUN(ctx context.Context) error {
 }
 
 func (c *Controller) applyTUN(ctx context.Context, target bool) error {
+	if err := c.checkCore(); err != nil {
+		return err
+	}
 	if c.tun != nil && *c.tun == target {
 		return nil
 	}
@@ -362,12 +400,21 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 	defer cancel()
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
+		if err := c.checkCore(); err != nil {
+			return err
+		}
 		last = c.client.SetTUN(ctx, target)
 		if last == nil {
 			// An accepted PATCH is not proof that the adapter was created.
 			for check := 0; check < 3; check++ {
+				if err := c.checkCore(); err != nil {
+					return err
+				}
 				s, err := c.client.Status(ctx)
 				if err == nil {
+					if err := c.checkCore(); err != nil {
+						return err
+					}
 					c.acceptStatus(s)
 					if s.TUN != nil && *s.TUN == target {
 						return nil

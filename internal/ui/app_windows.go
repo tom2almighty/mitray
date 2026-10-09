@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -260,7 +261,7 @@ func (a *app) run(label string, op func(context.Context) error, silent bool, aft
 			a.busy = false
 			if err != nil {
 				a.feedback.SetText(err.Error())
-				if !silent {
+				if !silent || errors.Is(err, controller.ErrTUNRestore) {
 					a.tray.ShowError("MiTray", err.Error())
 				}
 			} else {
@@ -303,7 +304,7 @@ func (a *app) render() {
 	a.proxyLabel.SetText("系统代理  " + stateName(s.Proxy))
 	memory := "TUN 尚无记忆，下次启动遵循配置文件。"
 	if s.Settings.TUNEnabled != nil {
-		memory = "下次启动恢复 TUN：" + stateName(s.Settings.TUNEnabled) + "。"
+		memory = "核心启动时的 TUN 记忆：" + stateName(s.Settings.TUNEnabled) + "。"
 	}
 	a.memoryLabel.SetText(memory)
 	a.tun.SetText("TUN 模式 · " + stateName(s.TUN))

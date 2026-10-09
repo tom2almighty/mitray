@@ -20,6 +20,7 @@ type fakeCore struct {
 	pid           int
 	starts, stops int
 	events        []string
+	onAlive       func()
 }
 
 func (f *fakeCore) Find(string) (int, error) { return f.pid, nil }
@@ -35,7 +36,12 @@ func (f *fakeCore) Stop(pid int, exe string) error {
 	f.events = append(f.events, "stop")
 	return nil
 }
-func (f *fakeCore) Alive(pid int, exe string) bool { return pid != 0 && pid == f.pid }
+func (f *fakeCore) Alive(pid int, exe string) bool {
+	if f.onAlive != nil {
+		f.onAlive()
+	}
+	return pid != 0 && pid == f.pid
+}
 
 type fakeSystem struct {
 	proxy   bool
