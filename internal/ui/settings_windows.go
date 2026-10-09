@@ -6,16 +6,51 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unsafe"
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 	"github.com/tom2almighty/mitray/internal/platform"
+	"golang.org/x/sys/windows"
 )
+
+// CenterSettingsWindow is shared with the second-instance activation path.
+func CenterSettingsWindow(hwnd win.HWND) error {
+	var cursor win.POINT
+	if !win.GetCursorPos(&cursor) {
+		return fmt.Errorf("无法获取鼠标位置，设置窗口未居中")
+	}
+	point := win.RECT{Left: cursor.X, Top: cursor.Y, Right: cursor.X + 1, Bottom: cursor.Y + 1}
+	monitor, _, err := windows.NewLazySystemDLL("user32.dll").NewProc("MonitorFromRect").Call(
+		uintptr(unsafe.Pointer(&point)), win.MONITOR_DEFAULTTONEAREST)
+	if monitor == 0 {
+		return fmt.Errorf("无法获取鼠标所在显示器: %w", err)
+	}
+	info := win.MONITORINFO{CbSize: uint32(unsafe.Sizeof(win.MONITORINFO{}))}
+	if !win.GetMonitorInfo(win.HMONITOR(monitor), &info) {
+		return fmt.Errorf("无法获取显示器工作区，设置窗口未居中")
+	}
+	// Moving across monitors can change DPI and resize the window synchronously.
+	for pass := 0; pass < 2; pass++ {
+		var bounds win.RECT
+		if !win.GetWindowRect(hwnd, &bounds) {
+			return fmt.Errorf("无法获取设置窗口尺寸")
+		}
+		work := info.RcWork
+		x := work.Left + max(0, (work.Right-work.Left-(bounds.Right-bounds.Left))/2)
+		y := work.Top + max(0, (work.Bottom-work.Top-(bounds.Bottom-bounds.Top))/2)
+		if !win.SetWindowPos(hwnd, 0, x, y, 0, 0, win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE) {
+			return fmt.Errorf("无法将设置窗口居中")
+		}
+	}
+	return nil
+}
 
 func (a *app) createWindow() error {
 	return (MainWindow{
 		AssignTo: &a.window, Title: "MiTray 设置", Visible: false,
-		MinSize: Size{650, 660}, Size: Size{710, 720},
+		MinSize: Size{Width: 650, Height: 660}, Size: Size{Width: 710, Height: 720},
 		Font:   Font{Family: "Microsoft YaHei UI", PointSize: 9},
 		Layout: VBox{Margins: Margins{Left: 24, Top: 20, Right: 24, Bottom: 20}, Spacing: 14},
 		Children: []Widget{
@@ -74,7 +109,7 @@ func (a *app) createWindow() error {
 					CheckBox{AssignTo: &a.autoStart, Text: "打开 MiTray 时自动启动 mihomo"},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 						Label{Text: "开机自启"}, ComboBox{AssignTo: &a.startupCombo, Model: []string{"关闭", "普通权限", "管理员权限"}, CurrentIndex: 0},
-						HSpacer{}, Label{Text: "登录后延迟"}, NumberEdit{AssignTo: &a.delay, Decimals: 0, MinValue: 0, MaxValue: 600, Value: 15, MinSize: Size{70, 0}, MaxSize: Size{85, 0}}, Label{Text: "秒"},
+						HSpacer{}, Label{Text: "登录后延迟"}, NumberEdit{AssignTo: &a.delay, Decimals: 0, MinValue: 0, MaxValue: 600, Value: 15, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}}, Label{Text: "秒"},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 						Label{Text: "TUN 需要 mihomo 以管理员权限运行。", TextColor: walk.RGB(100, 110, 120)},
@@ -83,11 +118,11 @@ func (a *app) createWindow() error {
 				}},
 			}},
 			VSpacer{},
-			TextLabel{AssignTo: &a.feedback, MinSize: Size{580, 42}, Text: "修改核心或配置后，保存会重新启动正在运行的核心。", TextColor: walk.RGB(65, 90, 120)},
+			TextLabel{AssignTo: &a.feedback, MinSize: Size{Width: 580, Height: 42}, Text: "修改核心或配置后，保存会重新启动正在运行的核心。", TextColor: walk.RGB(65, 90, 120)},
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 				Label{Text: "关闭窗口后继续在托盘运行。", TextColor: walk.RGB(110, 115, 125)}, HSpacer{},
 				PushButton{Text: "收起", OnClicked: func() { a.window.Hide() }},
-				PushButton{AssignTo: &a.saveButton, Text: "保存并应用", MinSize: Size{110, 32}, OnClicked: a.saveSettings},
+				PushButton{AssignTo: &a.saveButton, Text: "保存并应用", MinSize: Size{Width: 110, Height: 32}, OnClicked: a.saveSettings},
 			}},
 		},
 	}).Create()

@@ -47,7 +47,15 @@ func main() {
 		if !restart {
 			title, _ := windows.UTF16PtrFromString("MiTray 设置")
 			if h := win.FindWindow(nil, title); h != 0 {
-				win.ShowWindow(h, win.SW_SHOWNORMAL)
+				hidden := !win.IsWindowVisible(h)
+				if hidden || win.IsIconic(h) {
+					win.ShowWindow(h, win.SW_RESTORE)
+				}
+				if hidden {
+					if err := ui.CenterSettingsWindow(h); err != nil {
+						platform.MessageBox("MiTray", err.Error())
+					}
+				}
 				win.SetForegroundWindow(h)
 			}
 			return

@@ -96,11 +96,11 @@ func Run(ctx context.Context, ctl *controller.Controller, base, exe, version str
 	a.fillSettings()
 	a.render()
 	firstRun := ctl.Snapshot().Settings.Validate(base) != nil
-	if firstRun {
-		a.showSettings()
-	}
 	// Queue startup after the native message loop has started.
 	go a.window.Synchronize(func() {
+		if firstRun {
+			a.showSettings()
+		}
 		a.run("正在连接核心…", func(ctx context.Context) error {
 			if restartCore {
 				return ctl.RestartOnBoot(ctx)
@@ -175,7 +175,7 @@ func (a *app) buildTray() error {
 	add(&a.proxy, "系统代理", true, func() { a.run("正在切换系统代理…", a.controller.ToggleProxy, false, nil) })
 	add(&a.tun, "TUN 模式", true, func() { a.run("正在切换 TUN…", a.controller.ToggleTUN, false, nil) })
 	add(&a.refresh, "刷新状态", false, func() { a.run("正在刷新状态…", a.controller.Refresh, false, nil) })
-	add(&a.forget, "清除 TUN 记忆（下次跟随配置）", false, func() {
+	add(&a.forget, "清除 TUN 记忆", false, func() {
 		a.run("正在清除 TUN 记忆…", func(context.Context) error { return a.controller.ForgetTUN() }, false, func(err error) {
 			if err == nil {
 				a.feedback.SetText("已清除 TUN 记忆，下次启动核心时遵循配置文件。")
@@ -231,7 +231,7 @@ func (a *app) buildTray() error {
 	add(&a.restart, "重启核心", false, func() { a.run("正在重启核心…", a.controller.Restart, false, nil) })
 	add(&a.stop, "停止核心", false, func() { a.run("正在停止核心…", a.controller.Stop, false, nil) })
 	sep()
-	add(nil, "退出 MiTray（保留核心运行）", false, a.quit)
+	add(nil, "退出 MiTray", false, a.quit)
 	add(nil, "停止核心并退出", false, func() {
 		a.run("正在停止核心…", a.controller.Stop, false, func(err error) {
 			if err == nil {
@@ -416,8 +416,13 @@ func (a *app) elevate() {
 func (a *app) showSettings() {
 	if !a.window.Visible() {
 		a.fillSettings()
+		a.window.Show()
+		win.ShowWindow(a.window.Handle(), win.SW_RESTORE)
+		if err := CenterSettingsWindow(a.window.Handle()); err != nil {
+			a.feedback.SetText(err.Error())
+		}
+	} else if win.IsIconic(a.window.Handle()) {
+		win.ShowWindow(a.window.Handle(), win.SW_RESTORE)
 	}
-	a.window.Show()
-	win.ShowWindow(a.window.Handle(), win.SW_RESTORE)
 	win.SetForegroundWindow(a.window.Handle())
 }
