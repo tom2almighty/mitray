@@ -12,6 +12,7 @@ import (
 	"github.com/lxn/win"
 	"github.com/tom2almighty/mitray/internal/controller"
 	"github.com/tom2almighty/mitray/internal/platform"
+	"github.com/tom2almighty/mitray/internal/proxyenv"
 	"github.com/tom2almighty/mitray/internal/resources"
 	"golang.org/x/sys/windows"
 )
@@ -175,6 +176,26 @@ func (a *app) buildTray() error {
 	sep()
 	add(&a.proxy, "系统代理", true, func() { a.run("正在切换系统代理…", a.controller.ToggleProxy, false, nil) })
 	add(&a.tun, "TUN 模式", true, func() { a.run("正在切换 TUN…", a.controller.ToggleTUN, false, nil) })
+	envMenu, err := walk.NewMenu()
+	if err != nil {
+		return err
+	}
+	envAction, err := m.Actions().AddMenu(envMenu)
+	if err != nil {
+		return err
+	}
+	envAction.SetText("复制代理环境变量")
+	for _, item := range []struct{ shell, label string }{
+		{proxyenv.ShellPowerShell, "PowerShell"},
+		{proxyenv.ShellCmd, "CMD"},
+		{proxyenv.ShellBash, "Bash"},
+	} {
+		x, e := a.action(envMenu, item.label, false, func() { a.copyEnv(item.shell, item.label) })
+		if e != nil {
+			return e
+		}
+		a.mutations = append(a.mutations, x)
+	}
 	add(&a.refresh, "刷新状态", false, func() { a.run("正在刷新状态…", a.controller.Refresh, false, nil) })
 	add(&a.forget, "清除 TUN 记忆", false, func() {
 		a.run("正在清除 TUN 记忆…", func(context.Context) error { return a.controller.ForgetTUN() }, false, func(err error) {
@@ -387,6 +408,31 @@ func (a *app) open(target string) {
 		a.feedback.SetText("打开失败: " + err.Error())
 		a.tray.ShowError("MiTray", "打开失败: "+err.Error())
 	}
+}
+
+func (a *app) copyEnv(shell, label string) {
+	var port int
+	var command string
+	a.run("正在准备环境变量…", func(ctx context.Context) error {
+		p, err := a.controller.ProxyPort(ctx)
+		if err != nil {
+			return err
+		}
+		port, command = p, proxyenv.Script(shell, p)
+		return nil
+	}, false, func(err error) {
+		if err != nil {
+			return
+		}
+		if err := walk.Clipboard().SetText(command); err != nil {
+			a.feedback.SetText("写入剪贴板失败: " + err.Error())
+			a.tray.ShowError("MiTray", "写入剪贴板失败: "+err.Error())
+			return
+		}
+		message := fmt.Sprintf("已复制 %s 代理环境变量（127.0.0.1:%d）。", label, port)
+		a.feedback.SetText(message)
+		a.tray.ShowInfo("MiTray", message)
+	})
 }
 
 func (a *app) quit() {

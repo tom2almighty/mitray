@@ -461,6 +461,29 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 	return nil
 }
 
+// ProxyPort resolves the local HTTP proxy port used by clipboard commands.
+// The live port of a running core wins; otherwise the selected configuration
+// (local file or cached remote copy) is read without starting or touching the
+// core. A remote configuration is never downloaded here.
+func (c *Controller) ProxyPort(ctx context.Context) (int, error) {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if c.pid != 0 && c.proxyPort > 0 {
+		return c.proxyPort, nil
+	}
+	if c.cfg.ConfigPath == "" && c.cfg.ConfigURL == "" {
+		return 0, errors.New("请先在设置中选择 mihomo 配置文件")
+	}
+	src, err := prepareSource(ctx, c.base, c.cfg, true)
+	if err != nil {
+		return 0, err
+	}
+	if src.connection.ProxyPort == 0 {
+		return 0, errors.New("mihomo 没有可用的 mixed-port 或 port")
+	}
+	return src.connection.ProxyPort, nil
+}
+
 func (c *Controller) ForgetTUN() error {
 	c.op.Lock()
 	defer c.op.Unlock()
