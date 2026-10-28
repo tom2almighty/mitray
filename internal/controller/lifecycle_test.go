@@ -158,6 +158,41 @@ func TestAPIReconnectDoesNotRestoreTUN(t *testing.T) {
 	}
 }
 
+func TestRefreshPreservesUnexpectedExitOutput(t *testing.T) {
+	c, _, core, _, _ := fixture(t, false, nil)
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	core.output = "fatal: invalid configuration"
+	core.pid = 0
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot := c.Snapshot(); snapshot.Running || snapshot.Diagnostics != core.output {
+		t.Fatalf("unexpected exit state: running=%t diagnostics=%q", snapshot.Running, snapshot.Diagnostics)
+	}
+}
+
+func TestRenamingActiveProfileDoesNotRestartCore(t *testing.T) {
+	c, _, core, _, _ := fixture(t, false, nil)
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	next := c.Snapshot().Settings
+	profile := next.Profiles["default"]
+	delete(next.Profiles, "default")
+	next.Profiles["renamed"] = profile
+	next.ActiveProfile = "renamed"
+	if err := c.SaveSettings(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	if core.starts != 1 || core.stops != 0 {
+		t.Fatalf("profile rename restarted the core: %+v", core.events)
+	}
+}
+
 func TestCoreReplacementStopsOldRecovery(t *testing.T) {
 	c, api, core, _, _ := fixture(t, false, ptr(false))
 	ctx := context.Background()

@@ -1,38 +1,71 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/tom2almighty/mitray/internal/storage"
-	"gopkg.in/ini.v1"
 )
 
+const (
+	Filename     = "mitray.toml"
+	ProfileLocal = "local"
+	ProfileURL   = "url"
+)
+
+type Profile struct {
+	Type string `toml:"type"`
+	Path string `toml:"path,omitempty"`
+	URL  string `toml:"url,omitempty"`
+}
+
 type Settings struct {
-	CorePath, ConfigPath, ConfigURL, ActiveProfile string
-	Profiles                                       map[string]string
-	AutoStartCore                                  bool
-	StartupLevel                                   string // off, normal, admin; empty means discover an existing task
-	StartupDelay                                   int
-	TUNEnabled                                     *bool // nil means the user has not overridden the YAML setting
+	CorePath      string
+	ActiveProfile string
+	Profiles      map[string]Profile
+	AutoStartCore bool
+	StartupLevel  string // off, normal, admin; empty means discover an existing task
+	StartupDelay  int
+	TUNEnabled    *bool // nil means the user has not overridden the YAML setting
+}
+
+type fileSettings struct {
+	Core     fileCore           `toml:"core"`
+	Profiles map[string]Profile `toml:"profiles"`
+	Startup  fileStartup        `toml:"startup"`
+	State    fileState          `toml:"state"`
+}
+
+type fileCore struct {
+	Path          string `toml:"path"`
+	ActiveProfile string `toml:"active_profile"`
+}
+
+type fileStartup struct {
+	LaunchCore   bool   `toml:"launch_core"`
+	TaskLevel    string `toml:"task_level"`
+	DelaySeconds int    `toml:"delay_seconds"`
+}
+
+type fileState struct {
+	TUNEnabled *bool `toml:"tun_enabled,omitempty"`
 }
 
 func Default() Settings {
-	return Settings{Profiles: map[string]string{}, ActiveProfile: "default", AutoStartCore: true, StartupDelay: 15}
+	return Settings{Profiles: map[string]Profile{}, ActiveProfile: "default", AutoStartCore: true, StartupDelay: 15}
 }
 
 func (s Settings) Clone() Settings {
-	p := make(map[string]string, len(s.Profiles))
-	for k, v := range s.Profiles {
-		p[k] = v
+	profiles := make(map[string]Profile, len(s.Profiles))
+	for name, profile := range s.Profiles {
+		profiles[name] = profile
 	}
-	s.Profiles = p
+	s.Profiles = profiles
 	if s.TUNEnabled != nil {
 		b := *s.TUNEnabled
 		s.TUNEnabled = &b
@@ -49,27 +82,47 @@ func (s Settings) ProfileNames() []string {
 	return names
 }
 
-func (s Settings) Resolve(base, path string) string {
-	if path == "" {
-		return ""
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(base, path)
-	}
-	return filepath.Clean(path)
+func (s Settings) ActiveProfileConfig() (Profile, bool) {
+	profile, ok := s.Profiles[s.ActiveProfile]
+	return profile, ok
 }
 
-func (s Settings) Validate(base string) error {
-	if err := regularFile(s.Resolve(base, s.CorePath)); err != nil {
-		return fmt.Errorf("请选择有效的 mihomo 核心文件: %w", err)
-	}
-	if s.ConfigURL != "" {
-		u, err := url.Parse(s.ConfigURL)
+func (s Settings) Resolve(base, path string) string {
+	return resolvePath(base, path)
+}
+
+func (p Profile) Resolve(base string) string {
+	return resolvePath(base, p.Path)
+}
+
+func (p Profile) Validate(base string) error {
+	switch p.Type {
+	case ProfileLocal:
+		return regularFile(p.Resolve(base))
+	case ProfileURL:
+		u, err := url.Parse(p.URL)
 		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 			return fmt.Errorf("远程配置地址必须是完整的 HTTP 或 HTTPS URL")
 		}
-	} else if err := regularFile(s.Resolve(base, s.ConfigPath)); err != nil {
-		return fmt.Errorf("请选择有效的 mihomo 配置文件: %w", err)
+		return nil
+	default:
+		return fmt.Errorf("配置来源类型必须是 local 或 url")
+	}
+}
+
+func (s Settings) Validate(base string) error {
+	if err := regularFile(resolvePath(base, s.CorePath)); err != nil {
+		return fmt.Errorf("请选择有效的 mihomo 核心文件: %w", err)
+	}
+	if err := ValidateProfileName(s.ActiveProfile); err != nil {
+		return err
+	}
+	profile, ok := s.ActiveProfileConfig()
+	if !ok {
+		return fmt.Errorf("请选择有效的 mihomo 配置档案")
+	}
+	if err := profile.Validate(base); err != nil {
+		return fmt.Errorf("请选择有效的 mihomo 配置档案: %w", err)
 	}
 	if s.StartupDelay < 0 || s.StartupDelay > 600 {
 		return fmt.Errorf("自启延迟应为 0–600 秒")
@@ -80,6 +133,29 @@ func (s Settings) Validate(base string) error {
 		return fmt.Errorf("无效的开机自启选项")
 	}
 	return nil
+}
+
+func ValidateProfileName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("配置名称不能为空")
+	}
+	if name != strings.TrimSpace(name) {
+		return fmt.Errorf("配置名称首尾不能包含空白")
+	}
+	if strings.ContainsAny(name, "\r\n\x00") {
+		return fmt.Errorf("配置名称不能包含换行或空字符")
+	}
+	return nil
+}
+
+func resolvePath(base, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	return filepath.Clean(path)
 }
 
 func regularFile(path string) error {
@@ -98,108 +174,68 @@ func regularFile(path string) error {
 
 type Store struct{ Path string }
 
-func readINI(path string) (*ini.File, error) {
-	b, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return ini.Empty(), nil
+func (s Settings) fileSettings() fileSettings {
+	profiles := make(map[string]Profile, len(s.Profiles))
+	for name, profile := range s.Profiles {
+		profiles[name] = profile
 	}
-	if err != nil {
-		return nil, err
+	return fileSettings{
+		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile},
+		Profiles: profiles,
+		Startup:  fileStartup{LaunchCore: s.AutoStartCore, TaskLevel: s.StartupLevel, DelaySeconds: s.StartupDelay},
+		State:    fileState{TUNEnabled: s.TUNEnabled},
 	}
-	// AHK IniWrite can produce UTF-16LE files.
-	if len(b) >= 2 && b[0] == 0xff && b[1] == 0xfe {
-		b = decodeUTF16(b[2:])
+}
+
+func (f fileSettings) settings() Settings {
+	profiles := make(map[string]Profile, len(f.Profiles))
+	for name, profile := range f.Profiles {
+		profiles[name] = profile
 	}
-	return ini.LoadSources(ini.LoadOptions{IgnoreInlineComment: true, PreserveSurroundedQuote: true}, b)
+	s := Settings{
+		CorePath:      f.Core.Path,
+		ActiveProfile: f.Core.ActiveProfile,
+		Profiles:      profiles,
+		AutoStartCore: f.Startup.LaunchCore,
+		StartupLevel:  f.Startup.TaskLevel,
+		StartupDelay:  f.Startup.DelaySeconds,
+	}
+	if f.State.TUNEnabled != nil {
+		b := *f.State.TUNEnabled
+		s.TUNEnabled = &b
+	}
+	return s
 }
 
 func (st Store) Load() (Settings, error) {
-	s := Default()
-	f, err := readINI(st.Path)
+	data, err := os.ReadFile(st.Path)
+	if os.IsNotExist(err) {
+		return Default(), nil
+	}
 	if err != nil {
-		return s, err
+		return Default(), err
 	}
-	m, opts := f.Section("Mihomo"), f.Section("Settings")
-	s.CorePath = m.Key("CorePath").Value()
-	s.ConfigPath = m.Key("ConfigPath").Value()
-	s.ConfigURL = m.Key("ConfigURL").Value()
-	if v := m.Key("ActiveProfile").Value(); v != "" {
-		s.ActiveProfile = v
-	}
-	for _, k := range f.Section("Profiles").Keys() {
-		if k.Value() != "" {
-			s.Profiles[k.Name()] = k.Value()
-		}
-	}
-	if len(s.Profiles) == 0 && s.ConfigPath != "" {
-		s.Profiles[s.ActiveProfile] = s.ConfigPath
-	}
-	if path := s.Profiles[s.ActiveProfile]; s.ConfigURL == "" && path != "" {
-		s.ConfigPath = path
-	}
-	s.AutoStartCore = opts.Key("AutoStartCore").MustBool(true)
-	s.StartupDelay = opts.Key("AutoStartupDelaySec").MustInt(15)
-	if s.StartupDelay < 0 || s.StartupDelay > 600 {
-		s.StartupDelay = 15
-	}
-	s.StartupLevel = opts.Key("AutoStartupLevel").Value()
-	hasState := f.HasSection("State")
-	state := f.Section("State")
-	// Once State exists, a missing key is intentional ("follow YAML"). Do not
-	// resurrect an old Settings/TUNEnabled after the user clears the override.
-	if hasState {
-		if state.HasKey("TUNEnabled") {
-			s.TUNEnabled, err = parseBool(state.Key("TUNEnabled").Value())
-		}
-	} else if opts.Key("TUNControl").Value() != "file" && opts.Key("RememberTUN").MustBool(true) && opts.HasKey("TUNEnabled") {
-		s.TUNEnabled, err = parseBool(opts.Key("TUNEnabled").Value())
-	}
-	return s, err
-}
-
-func parseBool(v string) (*bool, error) {
-	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	file := Default().fileSettings()
+	metadata, err := toml.Decode(string(data), &file)
 	if err != nil {
-		return nil, fmt.Errorf("保存的 TUN 状态无效，请将 TUNEnabled 设为 0 或 1")
+		return Default(), fmt.Errorf("解析 %s: %w", filepath.Base(st.Path), err)
 	}
-	return &b, nil
+	if keys := metadata.Undecoded(); len(keys) > 0 {
+		names := make([]string, 0, len(keys))
+		for _, key := range keys {
+			names = append(names, key.String())
+		}
+		return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
+	}
+	return file.settings(), nil
 }
 
 func (st Store) Save(s Settings) error {
-	f, err := readINI(st.Path)
+	data, err := toml.Marshal(s.fileSettings())
 	if err != nil {
-		return err
+		return fmt.Errorf("生成 %s: %w", filepath.Base(st.Path), err)
 	}
-	m, opts := f.Section("Mihomo"), f.Section("Settings")
-	for k, v := range map[string]string{"CorePath": s.CorePath, "ConfigPath": s.ConfigPath, "ConfigURL": s.ConfigURL, "ActiveProfile": s.ActiveProfile} {
-		m.Key(k).SetValue(v)
-	}
-	f.DeleteSection("Profiles")
-	for _, name := range s.ProfileNames() {
-		f.Section("Profiles").Key(name).SetValue(s.Profiles[name])
-	}
-	opts.Key("AutoStartCore").SetValue(boolINI(s.AutoStartCore))
-	opts.Key("AutoStartupDelaySec").SetValue(strconv.Itoa(s.StartupDelay))
-	opts.Key("AutoStartupLevel").SetValue(s.StartupLevel)
-	for _, k := range []string{"TUNControl", "TUNEnabled", "RememberTUN", "AutoRestoreTUN"} {
-		opts.DeleteKey(k)
-	}
-	state := f.Section("State")
-	state.Key("Schema").SetValue("1")
-	state.DeleteKey("TUNEnabled")
-	if s.TUNEnabled != nil {
-		state.Key("TUNEnabled").SetValue(boolINI(*s.TUNEnabled))
-	}
-	var buf bytes.Buffer
-	if _, err := f.WriteTo(&buf); err != nil {
-		return err
-	}
-	return storage.WriteFile(st.Path, buf.Bytes())
-}
-
-func boolINI(b bool) string {
-	if b {
-		return "1"
-	}
-	return "0"
+	const header = "# MiTray 配置。相对路径以 MiTray 所在目录为准。\n" +
+		"# type = \"local\" 使用 path；type = \"url\" 使用 url，远程配置缓存到 cache/。\n\n"
+	return storage.WriteFile(st.Path, append([]byte(header), data...))
 }

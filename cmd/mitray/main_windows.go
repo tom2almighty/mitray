@@ -67,13 +67,13 @@ func main() {
 		return
 	}
 	defer windows.CloseHandle(mutex)
-	store := config.Store{Path: filepath.Join(base, "config.ini")}
+	store := config.Store{Path: filepath.Join(base, config.Filename)}
 	cfg, err := store.Load()
 	if err != nil {
-		platform.MessageBox("MiTray", "读取 config.ini 失败，原文件已保留。\n"+err.Error())
+		platform.MessageBox("MiTray", "读取 "+config.Filename+" 失败，原文件已保留。\n"+err.Error())
 		return
 	}
-	c := controller.New(base, cfg, store, platform.Core{}, platform.System{Executable: exe})
+	c := controller.New(base, cfg, store, platform.NewCore(), platform.System{Executable: exe})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := ui.Run(ctx, c, base, exe, version, restart); err != nil {

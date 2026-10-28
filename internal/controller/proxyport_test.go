@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/tom2almighty/mitray/internal/config"
 )
 
 func TestProxyPortReadsSelectedConfigWithoutCore(t *testing.T) {
@@ -22,13 +24,14 @@ func TestProxyPortReadsSelectedConfigWithoutCore(t *testing.T) {
 	if port, err := c.ProxyPort(ctx); err != nil || port != 7890 {
 		t.Fatalf("mixed-port: got %d err %v", port, err)
 	}
-	if err := os.WriteFile(c.cfg.ConfigPath, []byte("port: 7891\n"), 0600); err != nil {
+	path := c.cfg.Profiles["default"].Path
+	if err := os.WriteFile(path, []byte("port: 7891\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if port, err := c.ProxyPort(ctx); err != nil || port != 7891 {
 		t.Fatalf("port fallback: got %d err %v", port, err)
 	}
-	if err := os.WriteFile(c.cfg.ConfigPath, []byte("tun:\n  enable: true\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("tun:\n  enable: true\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ProxyPort(ctx); err == nil {
@@ -45,13 +48,14 @@ func TestProxyPortPrefersLiveCoreState(t *testing.T) {
 	if !c.Snapshot().Running {
 		t.Fatal("fixture core did not start")
 	}
-	if err := os.Remove(c.cfg.ConfigPath); err != nil {
+	path := c.cfg.Profiles["default"].Path
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
 	if port, err := c.ProxyPort(ctx); err != nil || port != 7890 {
 		t.Fatalf("live port not preferred over disk: got %d err %v", port, err)
 	}
-	if err := os.WriteFile(c.cfg.ConfigPath, []byte("mixed-port: 9999\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("mixed-port: 9999\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Stop(ctx); err != nil {
@@ -66,15 +70,14 @@ func TestProxyPortUsesRemoteCacheOnly(t *testing.T) {
 	ctx := context.Background()
 	c, _, _, _, _ := fixture(t, false, nil)
 	c.cfg.AutoStartCore = false
-	c.cfg.ConfigPath = ""
-	c.cfg.ConfigURL = "https://example.com/mihomo.yaml"
+	c.cfg.Profiles["default"] = config.Profile{Type: config.ProfileURL, URL: "https://example.com/mihomo.yaml"}
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.ProxyPort(ctx); err == nil {
 		t.Fatal("missing cache must be reported")
 	}
-	hash := sha256.Sum256([]byte(c.cfg.ConfigURL))
+	hash := sha256.Sum256([]byte(c.cfg.Profiles["default"].URL))
 	cache := filepath.Join(c.base, "cache", fmt.Sprintf("%x.yaml", hash[:16]))
 	if err := os.MkdirAll(filepath.Dir(cache), 0700); err != nil {
 		t.Fatal(err)

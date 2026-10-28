@@ -1,0 +1,16 @@
+[core]
+path = ''
+active_profile = "default"
+
+[profiles.default]
+type = "local"
+path = ''
+# url = "https://example.com/config.yaml"
+
+[startup]
+launch_core = true
+task_level = "off"
+delay_seconds = 15
+
+[state]
+# 省略 tun_enabled 表示遵循 mihomo YAML；托盘成功切换后自动写入。

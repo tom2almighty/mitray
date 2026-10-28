@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ type fakeCore struct {
 	starts, stops int
 	events        []string
 	onAlive       func()
+	output        string
 }
 
 func (f *fakeCore) Find(string) (int, error) { return f.pid, nil }
@@ -42,15 +44,24 @@ func (f *fakeCore) Alive(pid int, exe string) bool {
 	}
 	return pid != 0 && pid == f.pid
 }
+func (f *fakeCore) Output(int, string) string { return f.output }
 
 type fakeSystem struct {
 	proxy   bool
+	server  string
 	changes int
 	level   string
 }
 
-func (f *fakeSystem) Proxy() (bool, error)             { return f.proxy, nil }
-func (f *fakeSystem) SetProxy(b bool, p int) error     { f.proxy = b; f.changes++; return nil }
+func (f *fakeSystem) Proxy() (bool, string, error) { return f.proxy, f.server, nil }
+func (f *fakeSystem) SetProxy(b bool, p int) error {
+	f.proxy = b
+	if b {
+		f.server = fmt.Sprintf("127.0.0.1:%d", p)
+	}
+	f.changes++
+	return nil
+}
 func (f *fakeSystem) Startup() (string, error)         { return "off", nil }
 func (f *fakeSystem) SetStartup(l string, d int) error { f.level = l; return nil }
 
@@ -74,6 +85,8 @@ type apiFixture struct {
 	getFail   bool
 	patchFail bool
 	delayGets int
+	gets      int
+	authFail  bool
 }
 
 func (f *apiFixture) serve(w http.ResponseWriter, r *http.Request) {
@@ -105,12 +118,28 @@ func (f *apiFixture) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
+	f.gets++
+	if f.authFail {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if f.getFail || f.delayGets > 0 {
 		f.delayGets--
 		http.Error(w, "not ready", 503)
 		return
 	}
 	fmt.Fprintf(w, `{"tun":{"device":"custom-adapter","stack":"system","dns-hijack":["any:53"],"enable":%t},"mixed-port":7890}`, f.enabled)
+}
+
+func TestAuthenticationFailureDoesNotRetry(t *testing.T) {
+	c, api, _, _, _ := fixture(t, false, nil)
+	api.authFail = true
+	if err := c.Boot(context.Background()); err == nil || !strings.Contains(err.Error(), "secret") {
+		t.Fatalf("expected secret error, got %v", err)
+	}
+	if api.gets != 1 {
+		t.Fatalf("authentication failure was retried %d times", api.gets)
+	}
 }
 
 func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFixture, *fakeCore, *fakeSystem, *fakeStore) {
@@ -129,7 +158,7 @@ func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFix
 	}
 	cfg := config.Default()
 	cfg.CorePath = exe
-	cfg.ConfigPath = path
+	cfg.Profiles["default"] = config.Profile{Type: config.ProfileLocal, Path: path}
 	cfg.TUNEnabled = remembered
 	core, system, store := &fakeCore{}, &fakeSystem{}, &fakeStore{}
 	c := New(base, cfg, store, core, system)

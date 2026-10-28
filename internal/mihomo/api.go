@@ -16,6 +16,31 @@ type Status struct {
 	ProxyPort int
 }
 
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("mihomo API 返回 HTTP %d", e.StatusCode)
+}
+
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
+}
+
+func IsPermanent(err error) bool {
+	var target *permanentError
+	return errors.As(err, &target)
+}
+
 type Client struct {
 	Connection Connection
 	HTTP       *http.Client
@@ -31,11 +56,11 @@ func (c *Client) Close() { c.HTTP.CloseIdleConnections() }
 
 func (c *Client) request(ctx context.Context, method string, payload []byte) (*http.Response, error) {
 	if c.Connection.Endpoint == "" {
-		return nil, errors.New("mihomo 配置未设置 external-controller")
+		return nil, permanent(errors.New("mihomo 配置未设置 external-controller"))
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.Connection.Endpoint+"/configs", bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, permanent(err)
 	}
 	if c.Connection.Secret != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Connection.Secret)
@@ -50,9 +75,12 @@ func (c *Client) request(ctx context.Context, method string, payload []byte) (*h
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, errors.New("mihomo API 认证失败，请检查 secret")
+			return nil, permanent(errors.New("mihomo API 认证失败，请检查 secret"))
 		}
-		return nil, fmt.Errorf("mihomo API 返回 HTTP %d", resp.StatusCode)
+		if resp.StatusCode == 400 || resp.StatusCode == 404 {
+			return nil, permanent(&HTTPError{StatusCode: resp.StatusCode})
+		}
+		return nil, &HTTPError{StatusCode: resp.StatusCode}
 	}
 	return resp, nil
 }
@@ -71,7 +99,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 		Port      int `json:"port"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&raw); err != nil {
-		return Status{}, fmt.Errorf("读取 mihomo 状态: %w", err)
+		return Status{}, permanent(fmt.Errorf("读取 mihomo 状态: %w", err))
 	}
 	port := raw.MixedPort
 	if port == 0 {

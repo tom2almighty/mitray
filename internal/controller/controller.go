@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +21,11 @@ type Core interface {
 	Start(executable, configPath, directory string) (int, error)
 	Stop(pid int, executable string) error
 	Alive(pid int, executable string) bool
+	Output(pid int, executable string) string
 }
 
 type System interface {
-	Proxy() (bool, error)
+	Proxy() (bool, string, error)
 	SetProxy(enabled bool, port int) error
 	Startup() (string, error)
 	SetStartup(level string, delay int) error
@@ -32,12 +37,16 @@ type SettingsStore interface{ Save(config.Settings) error }
 var ErrTUNRestore = errors.New("恢复 TUN 启动记忆失败，本次核心运行期间不再自动重试")
 
 type Snapshot struct {
-	Settings   config.Settings
-	Running    bool
-	PID        int
-	TUN, Proxy *bool
-	WebURL     string
-	Notice     string
+	Settings         config.Settings
+	Running          bool
+	PID              int
+	TUN, Proxy       *bool
+	ProxyServer      string
+	ProxyTargetsCore bool
+	WebURL           string
+	Notice           string
+	Diagnostics      string
+	Revision         uint64
 }
 
 // All mutations (including lifecycle operations and recovery) share op.
@@ -57,8 +66,11 @@ type Controller struct {
 	activeExe                   string
 	client                      *mihomo.Client
 	tun, proxy                  *bool
+	proxyServer                 string
 	proxyPort                   int
 	notice                      string
+	diagnostics                 string
+	revision                    uint64
 	readyTimeout, retryInterval time.Duration
 }
 
@@ -85,12 +97,53 @@ func copyBool(p *bool) *bool {
 	return &b
 }
 
+func proxyServerTargetsPort(server string, port int) bool {
+	if port < 1 || port > 65535 {
+		return false
+	}
+	for _, entry := range strings.Split(server, ";") {
+		entry = strings.TrimSpace(entry)
+		if i := strings.IndexByte(entry, '='); i >= 0 {
+			entry = strings.TrimSpace(entry[i+1:])
+		}
+		host, value, err := net.SplitHostPort(entry)
+		if err != nil {
+			continue
+		}
+		n, err := strconv.Atoi(value)
+		if err != nil || n != port {
+			continue
+		}
+		switch strings.ToLower(strings.Trim(host, "[]")) {
+		case "127.0.0.1", "localhost", "::1":
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Controller) publish() {
-	v := Snapshot{Settings: c.cfg.Clone(), Running: c.pid != 0, PID: c.pid, TUN: copyBool(c.tun), Proxy: copyBool(c.proxy), Notice: c.notice}
+	v := Snapshot{
+		Settings:         c.cfg.Clone(),
+		Running:          c.pid != 0,
+		PID:              c.pid,
+		TUN:              copyBool(c.tun),
+		Proxy:            copyBool(c.proxy),
+		ProxyServer:      c.proxyServer,
+		ProxyTargetsCore: c.proxy != nil && *c.proxy && proxyServerTargetsPort(c.proxyServer, c.proxyPort),
+		Notice:           c.notice,
+		Diagnostics:      c.diagnostics,
+	}
 	if c.client != nil {
 		v.WebURL = c.client.Connection.WebURL()
 	}
 	c.viewMu.Lock()
+	old := c.view
+	old.Revision, v.Revision = 0, 0
+	if !reflect.DeepEqual(old, v) {
+		c.revision++
+	}
+	v.Revision = c.revision
 	c.view = v
 	c.viewMu.Unlock()
 }
@@ -142,6 +195,7 @@ func (c *Controller) Start(ctx context.Context) error {
 }
 
 func (c *Controller) start(ctx context.Context, prepared *source) error {
+	c.diagnostics = ""
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -202,10 +256,30 @@ func (c *Controller) restoreTUN(ctx context.Context) (err error) {
 
 func (c *Controller) checkCore() error {
 	if !c.core.Alive(c.pid, c.activeExe) {
+		output := c.coreOutput()
 		c.pid, c.tun = 0, nil
-		return errors.New("核心进程已退出或变化，已取消当前操作")
+		c.diagnostics = output
+		err := errors.New("核心进程已退出或变化，已取消当前操作")
+		if output != "" {
+			return fmt.Errorf("%w\n\n最近核心输出:\n%s", err, tailText(output, 1600))
+		}
+		return err
 	}
 	return nil
+}
+
+func (c *Controller) coreOutput() string {
+	if c.pid == 0 {
+		return ""
+	}
+	return strings.TrimSpace(c.core.Output(c.pid, c.activeExe))
+}
+
+func tailText(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	return "…\n" + text[len(text)-limit:]
 }
 
 func (c *Controller) setClient(conn mihomo.Connection) {
@@ -232,9 +306,18 @@ func (c *Controller) waitReady(ctx context.Context) error {
 			c.acceptStatus(status)
 			return nil
 		}
+		if mihomo.IsPermanent(err) {
+			return err
+		}
 		last = err
 		if err := pause(ctx, c.retryInterval); err != nil {
-			return fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
+			output := c.coreOutput()
+			c.diagnostics = output
+			err = fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
+			if output != "" {
+				return fmt.Errorf("%w\n\n最近核心输出:\n%s", err, tailText(output, 1600))
+			}
+			return err
 		}
 	}
 }
@@ -262,6 +345,7 @@ func (c *Controller) stop() error {
 	}
 	c.pid, c.tun, c.tunHandledPID = 0, nil, 0
 	c.notice = ""
+	c.diagnostics = ""
 	return nil
 }
 
@@ -296,11 +380,13 @@ func (c *Controller) acceptStatus(s mihomo.Status) {
 }
 
 func (c *Controller) readProxy() {
-	b, err := c.system.Proxy()
+	b, server, err := c.system.Proxy()
 	if err != nil {
 		c.proxy = nil
+		c.proxyServer = ""
 	} else {
 		c.proxy = &b
+		c.proxyServer = server
 	}
 }
 
@@ -311,6 +397,7 @@ func (c *Controller) Refresh(ctx context.Context) error {
 	c.readProxy()
 	restore := false
 	if c.pid != 0 && !c.core.Alive(c.pid, c.activeExe) {
+		c.diagnostics = c.coreOutput()
 		c.pid, c.tun = 0, nil
 	}
 	if c.pid == 0 {
@@ -404,6 +491,9 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 			return err
 		}
 		last = c.client.SetTUN(ctx, target)
+		if mihomo.IsPermanent(last) {
+			return last
+		}
 		if last == nil {
 			// An accepted PATCH is not proof that the adapter was created.
 			for check := 0; check < 3; check++ {
@@ -422,6 +512,9 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 				} else {
 					c.tun = nil
 					last = err
+					if mihomo.IsPermanent(err) {
+						return err
+					}
 				}
 				if pause(ctx, c.retryInterval) != nil {
 					break
@@ -442,19 +535,33 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 	c.op.Lock()
 	defer c.op.Unlock()
 	defer c.publish()
-	b, err := c.system.Proxy()
+	enabled, _, err := c.system.Proxy()
 	if err != nil {
 		return err
 	}
-	if !b && c.pid == 0 {
-		return errors.New("请先启动 mihomo 核心")
-	}
-	if !b && c.client != nil {
-		if s, err := c.client.Status(ctx); err == nil {
-			c.acceptStatus(s)
+	if !enabled {
+		if c.pid == 0 || !c.core.Alive(c.pid, c.activeExe) {
+			c.pid, c.tun = 0, nil
+			c.readProxy()
+			return errors.New("请先启动 mihomo 核心")
+		}
+		if c.client == nil {
+			c.readProxy()
+			return errors.New("尚未连接核心，请刷新状态或重启核心")
+		}
+		s, err := c.client.Status(ctx)
+		if err != nil {
+			c.tun = nil
+			c.readProxy()
+			return err
+		}
+		c.acceptStatus(s)
+		if c.proxyPort < 1 || c.proxyPort > 65535 {
+			return errors.New("mihomo 没有可用的 mixed-port 或 port")
 		}
 	}
-	if err := c.system.SetProxy(!b, c.proxyPort); err != nil {
+	if err := c.system.SetProxy(!enabled, c.proxyPort); err != nil {
+		c.readProxy()
 		return err
 	}
 	c.readProxy()
@@ -468,10 +575,10 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 func (c *Controller) ProxyPort(ctx context.Context) (int, error) {
 	c.op.Lock()
 	defer c.op.Unlock()
-	if c.pid != 0 && c.proxyPort > 0 {
+	if c.pid != 0 && c.proxyPort > 0 && c.core.Alive(c.pid, c.activeExe) {
 		return c.proxyPort, nil
 	}
-	if c.cfg.ConfigPath == "" && c.cfg.ConfigURL == "" {
+	if _, ok := c.cfg.ActiveProfileConfig(); !ok {
 		return 0, errors.New("请先在设置中选择 mihomo 配置文件")
 	}
 	src, err := prepareSource(ctx, c.base, c.cfg, true)
@@ -526,7 +633,9 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings) err
 		return fmt.Errorf("保存设置失败: %w", err)
 	}
 	c.cfg = next
-	changed := old.CorePath != next.CorePath || old.ConfigPath != next.ConfigPath || old.ConfigURL != next.ConfigURL
+	oldProfile, _ := old.ActiveProfileConfig()
+	nextProfile, _ := next.ActiveProfileConfig()
+	changed := old.CorePath != next.CorePath || !reflect.DeepEqual(oldProfile, nextProfile)
 	if changed {
 		if c.pid != 0 {
 			if err := c.restart(ctx); err != nil {
@@ -547,12 +656,12 @@ func (c *Controller) SelectProfile(ctx context.Context, name string) error {
 	c.op.Lock()
 	defer c.op.Unlock()
 	defer c.publish()
-	path, ok := c.cfg.Profiles[name]
+	_, ok := c.cfg.Profiles[name]
 	if !ok {
 		return errors.New("配置不存在")
 	}
 	next := c.cfg.Clone()
-	next.ActiveProfile, next.ConfigPath, next.ConfigURL = name, path, ""
+	next.ActiveProfile = name
 	return c.saveSettings(ctx, next)
 }
 
