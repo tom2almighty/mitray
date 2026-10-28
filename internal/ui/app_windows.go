@@ -10,6 +10,7 @@ import (
 
 	"github.com/lxn/walk"
 	"github.com/lxn/win"
+	"github.com/tom2almighty/mitray/internal/config"
 	"github.com/tom2almighty/mitray/internal/controller"
 	"github.com/tom2almighty/mitray/internal/platform"
 	"github.com/tom2almighty/mitray/internal/proxyenv"
@@ -26,14 +27,17 @@ type app struct {
 	tray                                                             *walk.NotifyIcon
 	icons                                                            [3]*walk.Icon
 	busy                                                             bool
+	refreshing                                                       bool
+	dirty                                                            bool
 	quitting                                                         bool
 	start, stop, restart, tun, proxy, refresh, forget, web, profiles *walk.Action
+	diagnostics                                                      *walk.Action
 	startup                                                          map[string]*walk.Action
 	mutations                                                        []*walk.Action
 	profileActions                                                   []*walk.Action
 	profileMenu                                                      *walk.Menu
 	profileSignature                                                 string
-	coreEdit, localEdit, urlEdit                                     *walk.LineEdit
+	coreEdit, profileNameEdit, localEdit, urlEdit                    *walk.LineEdit
 	profileCombo, sourceCombo, startupCombo                          *walk.ComboBox
 	autoStart                                                        *walk.CheckBox
 	delay                                                            *walk.NumberEdit
@@ -41,9 +45,12 @@ type app struct {
 	feedback                                                         *walk.TextLabel
 	settingsBody                                                     *walk.Composite
 	saveButton, tunButton, proxyButton, startButton                  *walk.PushButton
+	diagnosticsButton, deleteProfileButton                           *walk.PushButton
 	localBody, remoteBody                                            *walk.Composite
-	draftProfiles                                                    map[string]string
+	draftProfiles                                                    map[string]config.Profile
+	editingProfile                                                   string
 	filling                                                          bool
+	lastRevision                                                     uint64
 }
 
 func Run(ctx context.Context, ctl *controller.Controller, base, exe, version string, restartCore bool) error {
@@ -125,9 +132,7 @@ func Run(ctx context.Context, ctl *controller.Controller, base, exe, version str
 				return
 			case <-ticker.C:
 				a.window.Synchronize(func() {
-					if !a.busy && !a.quitting {
-						a.run("", ctl.Refresh, true, nil)
-					}
+					a.backgroundRefresh()
 				})
 			}
 		}
@@ -197,6 +202,7 @@ func (a *app) buildTray() error {
 		a.mutations = append(a.mutations, x)
 	}
 	add(&a.refresh, "刷新状态", false, func() { a.run("正在刷新状态…", a.controller.Refresh, false, nil) })
+	add(&a.diagnostics, "核心诊断…", false, a.showDiagnostics)
 	add(&a.forget, "清除 TUN 记忆", false, func() {
 		a.run("正在清除 TUN 记忆…", func(context.Context) error { return a.controller.ForgetTUN() }, false, func(err error) {
 			if err == nil {
@@ -251,16 +257,10 @@ func (a *app) buildTray() error {
 	sep()
 	add(&a.start, "启动核心", false, func() { a.run("正在启动核心…", a.controller.Start, false, nil) })
 	add(&a.restart, "重启核心", false, func() { a.run("正在重启核心…", a.controller.Restart, false, nil) })
-	add(&a.stop, "停止核心", false, func() { a.run("正在停止核心…", a.controller.Stop, false, nil) })
+	add(&a.stop, "停止核心", false, func() { a.stopCore(false) })
 	sep()
 	add(nil, "退出 MiTray", false, a.quit)
-	add(nil, "停止核心并退出", false, func() {
-		a.run("正在停止核心…", a.controller.Stop, false, func(err error) {
-			if err == nil {
-				a.quit()
-			}
-		})
-	})
+	add(nil, "停止核心并退出", false, func() { a.stopCore(true) })
 	return err
 }
 
@@ -301,6 +301,48 @@ func (a *app) run(label string, op func(context.Context) error, silent bool, aft
 	}()
 }
 
+func (a *app) backgroundRefresh() {
+	if a.busy || a.refreshing || a.quitting {
+		return
+	}
+	a.refreshing = true
+	go func() {
+		err := a.controller.Refresh(a.ctx)
+		a.window.Synchronize(func() {
+			a.refreshing = false
+			if a.quitting {
+				return
+			}
+			if err != nil {
+				if errors.Is(err, controller.ErrTUNRestore) {
+					a.feedback.SetText(err.Error())
+					a.tray.ShowError("MiTray", err.Error())
+				} else if a.window.Visible() {
+					a.feedback.SetText(err.Error())
+				}
+			}
+			if s := a.controller.Snapshot(); s.Revision != a.lastRevision {
+				a.render()
+			}
+		})
+	}()
+}
+
+func (a *app) stopCore(exitAfter bool) {
+	s := a.controller.Snapshot()
+	if s.ProxyTargetsCore {
+		message := fmt.Sprintf("系统代理仍开启并指向 %s。\n\n系统代理不会随核心关闭，停止后该代理端口将不可用。是否继续？", s.ProxyServer)
+		if walk.MsgBox(a.window, "停止核心", message, walk.MsgBoxYesNo|walk.MsgBoxIconWarning) != walk.DlgCmdYes {
+			return
+		}
+	}
+	a.run("正在停止核心…", a.controller.Stop, false, func(err error) {
+		if err == nil && exitAfter {
+			a.quit()
+		}
+	})
+}
+
 func stateName(value *bool) string {
 	if value == nil {
 		return "未知"
@@ -320,12 +362,22 @@ func (a *app) render() {
 	if s.Running {
 		core = "运行中"
 	}
-	a.statusLabel.SetText("核心  " + core)
-	a.tunLabel.SetText("TUN  " + stateName(s.TUN))
-	a.proxyLabel.SetText("系统代理  " + stateName(s.Proxy))
+	a.statusLabel.SetText(core)
+	a.tunLabel.SetText(stateName(s.TUN))
+	proxyState := stateName(s.Proxy)
+	if s.Proxy != nil && *s.Proxy && s.ProxyTargetsCore {
+		proxyState += " · 指向核心"
+	}
+	a.proxyLabel.SetText(proxyState)
 	memory := "TUN 尚无记忆，下次启动遵循配置文件。"
 	if s.Settings.TUNEnabled != nil {
 		memory = "核心启动时的 TUN 记忆：" + stateName(s.Settings.TUNEnabled) + "。"
+	}
+	if s.ProxyTargetsCore {
+		memory += " 系统代理当前指向核心端口，停止核心后仍会保持开启。"
+		a.memoryLabel.SetTextColor(systemAccentColor())
+	} else {
+		a.memoryLabel.SetTextColor(systemMutedColor())
 	}
 	a.memoryLabel.SetText(memory)
 	a.tun.SetText("TUN 模式 · " + stateName(s.TUN))
@@ -339,6 +391,7 @@ func (a *app) render() {
 	a.stop.SetEnabled(!a.busy && s.Running)
 	a.refresh.SetEnabled(!a.busy)
 	a.forget.SetEnabled(!a.busy && s.Settings.TUNEnabled != nil)
+	a.diagnostics.SetEnabled(!a.busy && s.Diagnostics != "")
 	a.web.SetEnabled(s.Running && s.WebURL != "")
 	for _, x := range a.mutations {
 		x.SetEnabled(!a.busy)
@@ -348,6 +401,7 @@ func (a *app) render() {
 	}
 	a.settingsBody.SetEnabled(!a.busy)
 	a.saveButton.SetEnabled(!a.busy)
+	a.diagnosticsButton.SetEnabled(!a.busy && s.Diagnostics != "")
 	a.tunButton.SetEnabled(a.tun.Enabled())
 	a.proxyButton.SetEnabled(a.proxy.Enabled())
 	a.startButton.SetEnabled(!a.busy)
@@ -366,6 +420,7 @@ func (a *app) render() {
 	}
 	a.tray.SetIcon(icon)
 	a.tray.SetToolTip("MiTray · " + core + "\nTUN " + stateName(s.TUN) + " · 系统代理 " + stateName(s.Proxy))
+	a.lastRevision = s.Revision
 }
 
 func (a *app) renderProfiles(s controller.Snapshot) {
@@ -376,11 +431,7 @@ func (a *app) renderProfiles(s controller.Snapshot) {
 		a.profileActions = nil
 		for _, name := range names {
 			x, err := a.action(a.profileMenu, name, true, func() {
-				a.run("正在切换配置…", func(ctx context.Context) error { return a.controller.SelectProfile(ctx, name) }, false, func(error) {
-					if !a.window.Visible() {
-						a.fillSettings()
-					}
-				})
+				a.run("正在切换配置…", func(ctx context.Context) error { return a.controller.SelectProfile(ctx, name) }, false, nil)
 			})
 			if err != nil {
 				a.feedback.SetText("更新配置菜单失败: " + err.Error())
@@ -391,11 +442,11 @@ func (a *app) renderProfiles(s controller.Snapshot) {
 		if len(names) != 0 {
 			a.profileMenu.Actions().Add(walk.NewSeparatorAction())
 		}
-		a.action(a.profileMenu, "添加配置文件…", false, func() { a.showSettings(); a.addProfile() })
+		a.action(a.profileMenu, "添加本地配置…", false, func() { a.showSettings(); a.addLocalProfile() })
 		a.profileSignature = sig
 	}
 	for _, x := range a.profileActions {
-		x.SetChecked(s.Settings.ConfigURL == "" && x.Text() == s.Settings.ActiveProfile)
+		x.SetChecked(x.Text() == s.Settings.ActiveProfile)
 		x.SetEnabled(!a.busy)
 	}
 }
@@ -462,7 +513,9 @@ func (a *app) elevate() {
 
 func (a *app) showSettings() {
 	if !a.window.Visible() {
-		a.fillSettings()
+		if !a.dirty {
+			a.fillSettings()
+		}
 		a.window.Show()
 		win.ShowWindow(a.window.Handle(), win.SW_RESTORE)
 		if err := CenterSettingsWindow(a.window.Handle()); err != nil {
