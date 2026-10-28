@@ -6,13 +6,23 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-type Core struct{}
+type Core struct {
+	runs sync.Map
+}
+
+type coreRun struct {
+	executable string
+	output     *outputBuffer
+}
+
+func NewCore() *Core { return &Core{} }
 
 func imagePath(h windows.Handle) (string, error) {
 	b := make([]uint16, 32768)
@@ -33,7 +43,7 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
-func (Core) Find(executable string) (int, error) {
+func (*Core) Find(executable string) (int, error) {
 	if executable == "" {
 		return 0, nil
 	}
@@ -44,18 +54,25 @@ func (Core) Find(executable string) (int, error) {
 	defer windows.CloseHandle(h)
 	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
 	var found int
+	var accessErr error
 	for err = windows.Process32First(h, &entry); err == nil; err = windows.Process32Next(h, &entry) {
 		if !strings.EqualFold(windows.UTF16ToString(entry.ExeFile[:]), filepath.Base(executable)) {
 			continue
 		}
 		p, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, entry.ProcessID)
 		if openErr != nil {
-			return 0, fmt.Errorf("无法识别同名核心进程，请以管理员身份运行 MiTray: %w", openErr)
+			if accessErr == nil {
+				accessErr = openErr
+			}
+			continue
 		}
 		path, pathErr := imagePath(p)
 		windows.CloseHandle(p)
 		if pathErr != nil {
-			return 0, pathErr
+			if accessErr == nil {
+				accessErr = pathErr
+			}
+			continue
 		}
 		if samePath(path, executable) {
 			if found != 0 {
@@ -67,24 +84,42 @@ func (Core) Find(executable string) (int, error) {
 	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
 		return 0, err
 	}
+	if found == 0 && accessErr != nil {
+		return 0, fmt.Errorf("无法识别同名核心进程，请以管理员身份运行 MiTray: %w", accessErr)
+	}
 	return found, nil
 }
 
-func (Core) Start(executable, configPath, directory string) (int, error) {
+func (c *Core) Start(executable, configPath, directory string) (int, error) {
 	cmd := exec.Command(executable, "-d", directory, "-f", configPath)
 	cmd.Dir = directory
-	// Nil stdout/stderr connect directly to the Windows null device. No log
-	// files or output pipes are kept; the core survives normal tray exit.
+	output := newOutputBuffer(32 << 10)
+	cmd.Stdout = output
+	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	go func() { _ = cmd.Wait() }()
+	c.runs.Range(func(key, _ any) bool {
+		c.runs.Delete(key)
+		return true
+	})
+	c.runs.Store(pid, coreRun{executable: executable, output: output})
+	go func() {
+		waitErr := cmd.Wait()
+		message := "\n[MiTray] mihomo 已退出"
+		if cmd.ProcessState != nil {
+			message += fmt.Sprintf("，退出码 %d", cmd.ProcessState.ExitCode())
+		} else if waitErr != nil {
+			message += ": " + waitErr.Error()
+		}
+		_, _ = output.Write([]byte(message + "\n"))
+	}()
 	return pid, nil
 }
 
-func (Core) Alive(pid int, executable string) bool {
+func (*Core) Alive(pid int, executable string) bool {
 	if pid == 0 {
 		return false
 	}
@@ -101,7 +136,7 @@ func (Core) Alive(pid int, executable string) bool {
 	return err == nil && samePath(path, executable)
 }
 
-func (Core) Stop(pid int, executable string) error {
+func (*Core) Stop(pid int, executable string) error {
 	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, uint32(pid))
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return nil
@@ -131,4 +166,19 @@ func (Core) Stop(pid int, executable string) error {
 		return errors.New("等待旧核心退出超时")
 	}
 	return nil
+}
+
+func (c *Core) Output(pid int, executable string) string {
+	value, ok := c.runs.Load(pid)
+	if !ok {
+		return ""
+	}
+	run, ok := value.(coreRun)
+	if !ok {
+		return ""
+	}
+	if !samePath(run.executable, executable) {
+		return ""
+	}
+	return run.output.String()
 }

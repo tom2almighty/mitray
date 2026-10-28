@@ -3,6 +3,7 @@ package platform
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/xml"
 	"fmt"
@@ -17,7 +18,24 @@ import (
 )
 
 func (s System) taskName() string {
-	return strings.TrimSuffix(filepath.Base(s.Executable), filepath.Ext(s.Executable))
+	return taskName(s.Executable)
+}
+
+func taskName(executable string) string {
+	canonical := filepath.Clean(executable)
+	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+		canonical = resolved
+	}
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(canonical), filepath.Ext(canonical)))
+	if runes := []rune(base); len(runes) > 80 {
+		base = string(runes[:80])
+	}
+	hash := sha256.Sum256([]byte(strings.ToLower(canonical)))
+	return fmt.Sprintf("%s-%x", base, hash[:4])
+}
+
+func legacyTaskName(executable string) string {
+	return strings.TrimSuffix(filepath.Base(executable), filepath.Ext(executable))
 }
 
 func schtasks(args ...string) ([]byte, error) {
@@ -43,18 +61,43 @@ func decodeOutput(b []byte) []byte {
 }
 
 func (s System) Startup() (string, error) {
-	output, err := schtasks("/Query", "/TN", s.taskName(), "/XML")
+	level, exists, err := queryTask(s.taskName())
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		if !taskCommandMatches(s.taskName(), s.Executable) {
+			return "", fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
+		}
+		return level, nil
+	}
+	legacy := legacyTaskName(s.Executable)
+	if legacy == s.taskName() {
+		return "off", nil
+	}
+	level, exists, err = queryTask(legacy)
+	if err != nil {
+		return "", err
+	}
+	if !exists || !taskCommandMatches(legacy, s.Executable) {
+		return "off", nil
+	}
+	return level, nil
+}
+
+func queryTask(name string) (level string, exists bool, err error) {
+	output, err := schtasks("/Query", "/TN", name, "/XML")
 	if err != nil {
 		// Check whether the task exists using a successful enumeration. A denied
 		// query must not silently turn an existing administrator task into "off".
 		all, listErr := schtasks("/Query", "/FO", "CSV", "/NH")
 		if listErr != nil {
-			return "", fmt.Errorf("无法查询任务计划程序")
+			return "", false, fmt.Errorf("无法查询任务计划程序")
 		}
-		if !strings.Contains(strings.ToLower(string(decodeOutput(all))), strings.ToLower(`\`+s.taskName())+`"`) {
-			return "off", nil
+		if !taskListed(all, name) {
+			return "", false, nil
 		}
-		return "", fmt.Errorf("无法读取已有自启任务，请以管理员身份运行 MiTray")
+		return "", true, fmt.Errorf("无法读取已有自启任务，请以管理员身份运行 MiTray")
 	}
 	var task struct {
 		Principals struct {
@@ -67,15 +110,37 @@ func (s System) Startup() (string, error) {
 		} `xml:"Settings"`
 	}
 	if err := xml.Unmarshal(decodeOutput(output), &task); err != nil {
-		return "", fmt.Errorf("读取自启任务: %w", err)
+		return "", true, fmt.Errorf("读取自启任务: %w", err)
 	}
 	if task.Settings.Enabled == "false" {
-		return "off", nil
+		return "off", true, nil
 	}
 	if task.Principals.Principal.RunLevel == "HighestAvailable" {
-		return "admin", nil
+		return "admin", true, nil
 	}
-	return "normal", nil
+	return "normal", true, nil
+}
+
+func taskListed(output []byte, name string) bool {
+	return strings.Contains(strings.ToLower(string(decodeOutput(output))), strings.ToLower(`\`+name)+`"`)
+}
+
+func taskCommandMatches(name, executable string) bool {
+	output, err := schtasks("/Query", "/TN", name, "/XML")
+	if err != nil {
+		return false
+	}
+	var task struct {
+		Actions struct {
+			Exec struct {
+				Command string `xml:"Command"`
+			} `xml:"Exec"`
+		} `xml:"Actions"`
+	}
+	if xml.Unmarshal(decodeOutput(output), &task) != nil {
+		return false
+	}
+	return samePath(task.Actions.Exec.Command, executable)
 }
 
 func xmlText(s string) string {
@@ -84,7 +149,29 @@ func xmlText(s string) string {
 	return b.String()
 }
 
+func taskXML(userID, executable, level string, delay int) string {
+	runLevel := "LeastPrivilege"
+	if level == "admin" {
+		runLevel = "HighestAvailable"
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>%s</UserId><Delay>PT%dS</Delay></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>%s</UserId><LogonType>InteractiveToken</LogonType><RunLevel>%s</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>%s</Command><Arguments>--autostart</Arguments><WorkingDirectory>%s</WorkingDirectory></Exec></Actions>
+</Task>`, xmlText(userID), delay, xmlText(userID), runLevel, xmlText(executable), xmlText(filepath.Dir(executable)))
+}
+
 func (s System) SetStartup(level string, delay int) error {
+	currentName := s.taskName()
+	currentExists, ownedCurrent, err := taskOwnership(currentName, s.Executable)
+	if err != nil {
+		return err
+	}
+	if currentExists && !ownedCurrent {
+		return fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
+	}
 	if level == "" || level == "off" {
 		current, err := s.Startup()
 		if err != nil {
@@ -93,30 +180,36 @@ func (s System) SetStartup(level string, delay int) error {
 		if current == "off" {
 			return nil
 		}
-		if _, err := schtasks("/Delete", "/TN", s.taskName(), "/F"); err != nil {
-			return fmt.Errorf("删除自启任务失败，请以管理员身份运行 MiTray")
+		if err := deleteTaskIfExists(s.taskName()); err != nil {
+			return err
+		}
+		owned, err := s.ownedLegacyTask()
+		if err != nil {
+			return err
+		}
+		if owned {
+			return deleteTask(legacyTaskName(s.Executable))
 		}
 		return nil
 	}
 	if level != "admin" && level != "normal" {
 		return fmt.Errorf("无效的自启选项")
 	}
+	owned, err := s.ownedLegacyTask()
+	if err != nil {
+		return err
+	}
+	if owned {
+		if err := deleteTask(legacyTaskName(s.Executable)); err != nil {
+			return err
+		}
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return err
 	}
 	userID := user.User.Sid.String()
-	runLevel := "LeastPrivilege"
-	if level == "admin" {
-		runLevel = "HighestAvailable"
-	}
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>%s</UserId><Delay>PT%dS</Delay></LogonTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>%s</UserId><LogonType>InteractiveToken</LogonType><RunLevel>%s</RunLevel></Principal></Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
-  <Actions Context="Author"><Exec><Command>%s</Command><Arguments>--autostart</Arguments><WorkingDirectory>%s</WorkingDirectory></Exec></Actions>
-</Task>`, xmlText(userID), delay, xmlText(userID), runLevel, xmlText(s.Executable), xmlText(filepath.Dir(s.Executable)))
+	content := taskXML(userID, s.Executable, level, delay)
 	f, err := os.CreateTemp("", "mitray-task-*.xml")
 	if err != nil {
 		return err
@@ -140,4 +233,45 @@ func (s System) SetStartup(level string, delay int) error {
 		return fmt.Errorf("创建自启任务失败；管理员自启需要以管理员身份运行 MiTray")
 	}
 	return nil
+}
+
+func taskOwnership(name, executable string) (bool, bool, error) {
+	_, exists, err := queryTask(name)
+	if err != nil || !exists {
+		return exists, false, err
+	}
+	return true, taskCommandMatches(name, executable), nil
+}
+
+func (s System) ownedLegacyTask() (bool, error) {
+	legacy := legacyTaskName(s.Executable)
+	if legacy == s.taskName() {
+		return false, nil
+	}
+	_, exists, err := queryTask(legacy)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	return taskCommandMatches(legacy, s.Executable), nil
+}
+
+func deleteTask(name string) error {
+	if _, err := schtasks("/Delete", "/TN", name, "/F"); err != nil {
+		return fmt.Errorf("删除自启任务失败，请以管理员身份运行 MiTray: %w", err)
+	}
+	return nil
+}
+
+func deleteTaskIfExists(name string) error {
+	_, exists, err := queryTask(name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	return deleteTask(name)
 }

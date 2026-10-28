@@ -13,17 +13,21 @@ type System struct{ Executable string }
 
 const internetSettings = `Software\Microsoft\Windows\CurrentVersion\Internet Settings`
 
-func (System) Proxy() (bool, error) {
+func (System) Proxy() (bool, string, error) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettings, registry.QUERY_VALUE)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	defer k.Close()
+	server, _, serverErr := k.GetStringValue("ProxyServer")
+	if serverErr != nil && serverErr != registry.ErrNotExist {
+		return false, "", serverErr
+	}
 	v, _, err := k.GetIntegerValue("ProxyEnable")
 	if err == registry.ErrNotExist {
-		return false, nil
+		return false, server, nil
 	}
-	return v != 0, err
+	return v != 0, server, err
 }
 
 func (System) SetProxy(enabled bool, port int) error {
