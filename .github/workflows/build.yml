@@ -4,18 +4,55 @@ on:
   push:
     branches: [main, dev]
     tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - .gitignore
   pull_request:
+    branches: [main, dev]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - .gitignore
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
+  verify:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Recurse -Filter *.go | ForEach-Object { gofmt -l $_.FullName })
+          if ($files.Count -gt 0) {
+            $files
+            throw "Go files are not formatted. Run gofmt."
+          }
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -24,7 +61,7 @@ jobs:
         env:
           MITRAY_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
         run: ./build.ps1 -Version $env:MITRAY_VERSION
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mitray-windows-amd64
           path: dist/mitray.exe
@@ -37,11 +74,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: mitray-windows-amd64
           path: dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/mitray.exe
           generate_release_notes: true
