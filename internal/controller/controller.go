@@ -456,7 +456,7 @@ func (c *Controller) ToggleTUN(ctx context.Context) error {
 		return errors.New("请先启动 mihomo 核心")
 	}
 	if c.client == nil {
-		return errors.New("尚未连接核心，请刷新状态或重启核心")
+		return errors.New("尚未连接核心，请稍候或重启核心")
 	}
 	s, err := c.client.Status(ctx)
 	if err != nil {
@@ -557,7 +557,7 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 		}
 		if c.client == nil {
 			c.readProxy()
-			return errors.New("尚未连接核心，请刷新状态或重启核心")
+			return errors.New("尚未连接核心，请稍候或重启核心")
 		}
 		s, err := c.client.Status(ctx)
 		if err != nil {

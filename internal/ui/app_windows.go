@@ -19,38 +19,38 @@ import (
 )
 
 type app struct {
-	ctx                                                              context.Context
-	cancel                                                           context.CancelFunc
-	controller                                                       *controller.Controller
-	base, exe, version                                               string
-	window                                                           *walk.MainWindow
-	tray                                                             *walk.NotifyIcon
-	icons                                                            [3]*walk.Icon
-	busy                                                             bool
-	refreshing                                                       bool
-	dirty                                                            bool
-	quitting                                                         bool
-	start, stop, restart, tun, proxy, refresh, forget, web, profiles *walk.Action
-	startup                                                          map[string]*walk.Action
-	mutations                                                        []*walk.Action
-	profileActions                                                   []*walk.Action
-	profileMenu                                                      *walk.Menu
-	profileSignature                                                 string
-	coreEdit, profileNameEdit, localEdit, urlEdit                    *walk.LineEdit
-	profileCombo, sourceCombo, startupCombo                          *walk.ComboBox
-	autoStart                                                        *walk.CheckBox
-	delay                                                            *walk.NumberEdit
-	statusLabel, tunLabel, proxyLabel, memoryLabel                   *walk.Label
-	feedback                                                         *walk.TextLabel
-	settingsBody                                                     *walk.Composite
-	saveButton, tunButton, proxyButton, startButton                  *walk.PushButton
-	activateProfileButton, deleteProfileButton                       *walk.PushButton
-	localBody, remoteBody                                            *walk.Composite
-	draftProfiles                                                    map[string]config.Profile
-	draftActiveProfile                                               string
-	editingProfile                                                   string
-	filling                                                          bool
-	lastRevision                                                     uint64
+	ctx                                                     context.Context
+	cancel                                                  context.CancelFunc
+	controller                                              *controller.Controller
+	base, exe, version                                      string
+	window                                                  *walk.MainWindow
+	tray                                                    *walk.NotifyIcon
+	icons                                                   [3]*walk.Icon
+	busy                                                    bool
+	refreshing                                              bool
+	dirty                                                   bool
+	quitting                                                bool
+	start, stop, restart, tun, proxy, forget, web, profiles *walk.Action
+	startup                                                 map[string]*walk.Action
+	mutations                                               []*walk.Action
+	profileActions                                          []*walk.Action
+	profileMenu                                             *walk.Menu
+	profileSignature                                        string
+	coreEdit, profileNameEdit, localEdit, urlEdit           *walk.LineEdit
+	profileCombo, sourceCombo, startupCombo                 *walk.ComboBox
+	autoStart                                               *walk.CheckBox
+	delay                                                   *walk.NumberEdit
+	statusLabel, tunLabel, proxyLabel, memoryLabel          *walk.Label
+	feedback                                                *walk.TextLabel
+	settingsBody                                            *walk.Composite
+	saveButton, tunButton, proxyButton, startButton         *walk.PushButton
+	activateProfileButton, deleteProfileButton              *walk.PushButton
+	localBody, remoteBody                                   *walk.Composite
+	draftProfiles                                           map[string]config.Profile
+	draftActiveProfile                                      string
+	editingProfile                                          string
+	filling                                                 bool
+	lastRevision                                            uint64
 }
 
 func Run(ctx context.Context, ctl *controller.Controller, base, exe, version string, restartCore bool) error {
@@ -201,7 +201,6 @@ func (a *app) buildTray() error {
 		}
 		a.mutations = append(a.mutations, x)
 	}
-	add(&a.refresh, "刷新状态", false, func() { a.run("正在刷新状态…", a.controller.Refresh, false, nil) })
 	add(&a.forget, "清除 TUN 记忆", false, func() {
 		a.run("正在清除 TUN 记忆…", func(context.Context) error { return a.controller.ForgetTUN() }, false, func(err error) {
 			if err == nil {
@@ -394,7 +393,6 @@ func (a *app) render() {
 	a.start.SetEnabled(!a.busy && !s.Running)
 	a.restart.SetEnabled(!a.busy)
 	a.stop.SetEnabled(!a.busy && s.Running)
-	a.refresh.SetEnabled(!a.busy)
 	a.forget.SetEnabled(!a.busy && s.Settings.TUNEnabled != nil)
 	a.web.SetEnabled(s.Running && s.WebURL != "")
 	for _, x := range a.mutations {
@@ -528,4 +526,5 @@ func (a *app) showSettings() {
 		win.ShowWindow(a.window.Handle(), win.SW_RESTORE)
 	}
 	win.SetForegroundWindow(a.window.Handle())
+	a.backgroundRefresh()
 }

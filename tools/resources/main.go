@@ -22,8 +22,8 @@ const (
 	sourceSVGFile = "mitray.svg"
 	baseFillColor = "#34619B"
 	colorRunning  = "#34619B" // Core running, proxy and TUN off (also EXE icon).
-	colorActive   = "#E67E22" // Core running, proxy or TUN enabled.
-	colorStopped  = "#7C8594" // Core stopped.
+	colorActive   = "#D7AC7F" // Core running, proxy or TUN enabled (RGB 215, 172, 127).
+	colorStopped  = "#D81E06" // Core stopped (RGB 216, 30, 6).
 )
 
 var iconSizes = []int{16, 20, 24, 32, 48, 64, 96, 128, 256}
