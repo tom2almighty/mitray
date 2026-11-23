@@ -21,7 +21,6 @@ type Core interface {
 	Start(executable, configPath, directory string) (int, error)
 	Stop(pid int, executable string) error
 	Alive(pid int, executable string) bool
-	Output(pid int, executable string) string
 }
 
 type System interface {
@@ -29,11 +28,12 @@ type System interface {
 	SetProxy(enabled bool, port int) error
 	Startup() (string, error)
 	SetStartup(level string, delay int) error
+	IsAdmin() bool
 }
 
 type SettingsStore interface{ Save(config.Settings) error }
 
-// ErrTUNRestore allows background recovery failures to notify the user once.
+// ErrTUNRestore allows startup recovery failures to notify the user once.
 var ErrTUNRestore = errors.New("恢复 TUN 启动记忆失败，本次核心运行期间不再自动重试")
 
 type Snapshot struct {
@@ -45,12 +45,11 @@ type Snapshot struct {
 	ProxyTargetsCore bool
 	WebURL           string
 	Notice           string
-	Diagnostics      string
 	Revision         uint64
 }
 
 // All mutations (including lifecycle operations and recovery) share op.
-// Polling only restores newly detected processes and never changes the preference.
+// Polling is read-only and never overrides the TUN state of external cores.
 // UI reads use a separate lock and cannot block on HTTP.
 type Controller struct {
 	op                          sync.Mutex
@@ -62,14 +61,14 @@ type Controller struct {
 	core                        Core
 	system                      System
 	pid                         int
-	tunHandledPID               int
+	ownedPID                    int
 	activeExe                   string
 	client                      *mihomo.Client
+	hasTUNConfig                bool
 	tun, proxy                  *bool
 	proxyServer                 string
 	proxyPort                   int
 	notice                      string
-	diagnostics                 string
 	revision                    uint64
 	readyTimeout, retryInterval time.Duration
 }
@@ -132,7 +131,6 @@ func (c *Controller) publish() {
 		ProxyServer:      c.proxyServer,
 		ProxyTargetsCore: c.proxy != nil && *c.proxy && proxyServerTargetsPort(c.proxyServer, c.proxyPort),
 		Notice:           c.notice,
-		Diagnostics:      c.diagnostics,
 	}
 	if c.client != nil {
 		v.WebURL = c.client.Connection.WebURL()
@@ -195,7 +193,6 @@ func (c *Controller) Start(ctx context.Context) error {
 }
 
 func (c *Controller) start(ctx context.Context, prepared *source) error {
-	c.diagnostics = ""
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -210,7 +207,7 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 	newProcess := pid == 0
 	if pid != 0 {
 		c.pid, c.activeExe = pid, exe
-		c.tunHandledPID = pid // Connecting to a running core must preserve its state.
+		c.ownedPID = 0 // Connecting to a running core must preserve its state.
 	}
 	var src source
 	if prepared != nil {
@@ -232,9 +229,9 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 		if err != nil {
 			return fmt.Errorf("启动 mihomo: %w", err)
 		}
+		c.ownedPID = pid
 	}
 	c.pid, c.tun = pid, nil
-	c.tunHandledPID = pid
 	c.publish()
 	if newProcess && c.cfg.TUNEnabled != nil {
 		return c.restoreTUN(ctx)
@@ -256,30 +253,10 @@ func (c *Controller) restoreTUN(ctx context.Context) (err error) {
 
 func (c *Controller) checkCore() error {
 	if !c.core.Alive(c.pid, c.activeExe) {
-		output := c.coreOutput()
-		c.pid, c.tun = 0, nil
-		c.diagnostics = output
-		err := errors.New("核心进程已退出或变化，已取消当前操作")
-		if output != "" {
-			return fmt.Errorf("%w\n\n最近核心输出:\n%s", err, tailText(output, 1600))
-		}
-		return err
+		c.pid, c.ownedPID, c.tun = 0, 0, nil
+		return errors.New("核心进程已退出或变化，已取消当前操作")
 	}
 	return nil
-}
-
-func (c *Controller) coreOutput() string {
-	if c.pid == 0 {
-		return ""
-	}
-	return strings.TrimSpace(c.core.Output(c.pid, c.activeExe))
-}
-
-func tailText(text string, limit int) string {
-	if len(text) <= limit {
-		return text
-	}
-	return "…\n" + text[len(text)-limit:]
 }
 
 func (c *Controller) setClient(conn mihomo.Connection) {
@@ -288,6 +265,7 @@ func (c *Controller) setClient(conn mihomo.Connection) {
 	}
 	c.client = mihomo.NewClient(conn)
 	c.proxyPort = conn.ProxyPort
+	c.hasTUNConfig = conn.HasTUN
 }
 
 func (c *Controller) waitReady(ctx context.Context) error {
@@ -311,13 +289,7 @@ func (c *Controller) waitReady(ctx context.Context) error {
 		}
 		last = err
 		if err := pause(ctx, c.retryInterval); err != nil {
-			output := c.coreOutput()
-			c.diagnostics = output
-			err = fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
-			if output != "" {
-				return fmt.Errorf("%w\n\n最近核心输出:\n%s", err, tailText(output, 1600))
-			}
-			return err
+			return fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
 		}
 	}
 }
@@ -327,6 +299,48 @@ func (c *Controller) Stop(ctx context.Context) error {
 	defer c.op.Unlock()
 	defer c.publish()
 	return c.stop()
+}
+
+func (c *Controller) StopAndDisableProxy(ctx context.Context) error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	defer c.publish()
+	if err := c.system.SetProxy(false, 0); err != nil {
+		c.readProxy()
+		return err
+	}
+	c.readProxy()
+	return c.stop()
+}
+
+func (c *Controller) disableTUNBeforeStop() {
+	if c.pid == 0 || c.client == nil || c.tun == nil || !*c.tun {
+		return
+	}
+	if !c.core.Alive(c.pid, c.activeExe) {
+		return
+	}
+	graceCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := c.client.SetTUN(graceCtx, false); err != nil {
+		return
+	}
+	step := c.retryInterval
+	if step > 200*time.Millisecond {
+		step = 200 * time.Millisecond
+	}
+	for range 5 {
+		if !c.core.Alive(c.pid, c.activeExe) {
+			return
+		}
+		if s, err := c.client.Status(graceCtx); err == nil && s.TUN != nil && !*s.TUN {
+			c.acceptStatus(s)
+			return
+		}
+		if pause(graceCtx, step) != nil {
+			return
+		}
+	}
 }
 
 func (c *Controller) stop() error {
@@ -339,13 +353,13 @@ func (c *Controller) stop() error {
 		c.pid, c.activeExe = pid, exe
 	}
 	if c.pid != 0 {
+		c.disableTUNBeforeStop()
 		if err := c.core.Stop(c.pid, c.activeExe); err != nil {
 			return fmt.Errorf("停止 mihomo: %w", err)
 		}
 	}
-	c.pid, c.tun, c.tunHandledPID = 0, nil, 0
+	c.pid, c.ownedPID, c.tun = 0, 0, nil
 	c.notice = ""
-	c.diagnostics = ""
 	return nil
 }
 
@@ -395,10 +409,8 @@ func (c *Controller) Refresh(ctx context.Context) error {
 	defer c.op.Unlock()
 	defer c.publish()
 	c.readProxy()
-	restore := false
 	if c.pid != 0 && !c.core.Alive(c.pid, c.activeExe) {
-		c.diagnostics = c.coreOutput()
-		c.pid, c.tun = 0, nil
+		c.pid, c.ownedPID, c.tun = 0, 0, nil
 	}
 	if c.pid == 0 {
 		exe := c.cfg.Resolve(c.base, c.cfg.CorePath)
@@ -412,10 +424,8 @@ func (c *Controller) Refresh(ctx context.Context) error {
 		if pid == 0 {
 			return nil
 		}
-		restore = c.tunHandledPID != pid && c.cfg.TUNEnabled != nil
-		c.pid, c.activeExe, c.tun = pid, exe, nil
-		// Consume recovery before any I/O so a failure cannot rearm it on refresh.
-		c.tunHandledPID = pid
+		// Externally started cores are observed only; never override their TUN state.
+		c.pid, c.ownedPID, c.activeExe, c.tun = pid, 0, exe, nil
 		c.publish()
 		if c.client != nil {
 			c.client.Close()
@@ -425,15 +435,9 @@ func (c *Controller) Refresh(ctx context.Context) error {
 	if c.client == nil {
 		src, err := prepareSource(ctx, c.base, c.cfg, true)
 		if err != nil {
-			if restore {
-				return fmt.Errorf("%w: %w", ErrTUNRestore, err)
-			}
 			return err
 		}
 		c.setClient(src.connection)
-	}
-	if restore {
-		return c.restoreTUN(ctx)
 	}
 	s, err := c.client.Status(ctx)
 	if err != nil {
@@ -483,6 +487,9 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 	if c.tun != nil && *c.tun == target {
 		return nil
 	}
+	if target && c.ownedPID != 0 && c.ownedPID == c.pid && !c.system.IsAdmin() {
+		return errors.New("当前 MiTray 未以管理员身份运行，无法启用 TUN；请使用「以管理员身份重新启动」或「清除 TUN 记忆」")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	var last error
@@ -527,6 +534,9 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 	}
 	if last != nil {
 		return fmt.Errorf("TUN 切换未确认，原记忆已保留: %w", last)
+	}
+	if target && !c.hasTUNConfig {
+		return errors.New("TUN 未达到目标状态，原记忆已保留；当前配置文件未包含 tun 段落，请检查 YAML 中的 tun/dns 配置并确认 mihomo 具有管理员权限")
 	}
 	return errors.New("TUN 未达到目标状态，原记忆已保留；请在 WebUI 查看日志，并确认 mihomo 具有管理员权限")
 }
@@ -639,16 +649,20 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings) err
 	if changed {
 		if c.pid != 0 {
 			if err := c.restart(ctx); err != nil {
+				pruneRemoteCache(c.base, next.Profiles)
 				return fmt.Errorf("设置已保存，但应用失败: %w", err)
 			}
+			pruneRemoteCache(c.base, next.Profiles)
 			return nil
 		}
 		if next.AutoStartCore {
 			if err := c.start(ctx, nil); err != nil {
+				pruneRemoteCache(c.base, next.Profiles)
 				return fmt.Errorf("设置已保存，但启动失败: %w", err)
 			}
 		}
 	}
+	pruneRemoteCache(c.base, next.Profiles)
 	return nil
 }
 

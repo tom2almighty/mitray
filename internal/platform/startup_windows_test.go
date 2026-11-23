@@ -72,16 +72,14 @@ func TestSamePathUsesWindowsCaseRules(t *testing.T) {
 	}
 }
 
-func TestCoreOutputIsScopedToExecutableIdentity(t *testing.T) {
-	core := NewCore()
-	output := newOutputBuffer(1024)
-	_, _ = output.Write([]byte("core output"))
-	core.runs.Store(123, coreRun{executable: `C:\Tools\MiTray\mihomo.exe`, output: output})
-
-	if got := core.Output(123, `c:\tools\mitray\MIHOMO.EXE`); got != "core output" {
-		t.Fatalf("same executable did not return output: %q", got)
+func TestParseTaskXMLSinglePass(t *testing.T) {
+	executable := `C:\Tools\MiTray\mitray.exe`
+	content := taskXML(`S-1-5-21`, executable, "admin", 15)
+	info, err := parseTaskXML([]byte(content))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := core.Output(123, `C:\Other\mihomo.exe`); got != "" {
-		t.Fatalf("different executable reused PID output: %q", got)
+	if info.level != "admin" || !samePath(info.command, executable) {
+		t.Fatalf("unexpected parsed task info: %+v", info)
 	}
 }

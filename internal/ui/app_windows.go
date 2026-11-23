@@ -31,7 +31,6 @@ type app struct {
 	dirty                                                            bool
 	quitting                                                         bool
 	start, stop, restart, tun, proxy, refresh, forget, web, profiles *walk.Action
-	diagnostics                                                      *walk.Action
 	startup                                                          map[string]*walk.Action
 	mutations                                                        []*walk.Action
 	profileActions                                                   []*walk.Action
@@ -45,9 +44,10 @@ type app struct {
 	feedback                                                         *walk.TextLabel
 	settingsBody                                                     *walk.Composite
 	saveButton, tunButton, proxyButton, startButton                  *walk.PushButton
-	diagnosticsButton, deleteProfileButton                           *walk.PushButton
+	activateProfileButton, deleteProfileButton                       *walk.PushButton
 	localBody, remoteBody                                            *walk.Composite
 	draftProfiles                                                    map[string]config.Profile
+	draftActiveProfile                                               string
 	editingProfile                                                   string
 	filling                                                          bool
 	lastRevision                                                     uint64
@@ -202,7 +202,6 @@ func (a *app) buildTray() error {
 		a.mutations = append(a.mutations, x)
 	}
 	add(&a.refresh, "刷新状态", false, func() { a.run("正在刷新状态…", a.controller.Refresh, false, nil) })
-	add(&a.diagnostics, "核心诊断…", false, a.showDiagnostics)
 	add(&a.forget, "清除 TUN 记忆", false, func() {
 		a.run("正在清除 TUN 记忆…", func(context.Context) error { return a.controller.ForgetTUN() }, false, func(err error) {
 			if err == nil {
@@ -313,13 +312,8 @@ func (a *app) backgroundRefresh() {
 			if a.quitting {
 				return
 			}
-			if err != nil {
-				if errors.Is(err, controller.ErrTUNRestore) {
-					a.feedback.SetText(err.Error())
-					a.tray.ShowError("MiTray", err.Error())
-				} else if a.window.Visible() {
-					a.feedback.SetText(err.Error())
-				}
+			if err != nil && a.window.Visible() {
+				a.feedback.SetText(err.Error())
 			}
 			if s := a.controller.Snapshot(); s.Revision != a.lastRevision {
 				a.render()
@@ -330,13 +324,24 @@ func (a *app) backgroundRefresh() {
 
 func (a *app) stopCore(exitAfter bool) {
 	s := a.controller.Snapshot()
+	disableProxy := false
 	if s.ProxyTargetsCore {
-		message := fmt.Sprintf("系统代理仍开启并指向 %s。\n\n系统代理不会随核心关闭，停止后该代理端口将不可用。是否继续？", s.ProxyServer)
-		if walk.MsgBox(a.window, "停止核心", message, walk.MsgBoxYesNo|walk.MsgBoxIconWarning) != walk.DlgCmdYes {
+		message := fmt.Sprintf("系统代理仍开启并指向 %s。\n\n是否同时关闭系统代理？\n\n• 是：关闭系统代理并停止核心\n• 否：保留系统代理，仅停止核心\n• 取消：不停止核心", s.ProxyServer)
+		switch walk.MsgBox(a.window, "停止核心", message, walk.MsgBoxYesNoCancel|walk.MsgBoxIconWarning) {
+		case walk.DlgCmdYes:
+			disableProxy = true
+		case walk.DlgCmdNo:
+		default:
 			return
 		}
 	}
-	a.run("正在停止核心…", a.controller.Stop, false, func(err error) {
+	op := a.controller.Stop
+	label := "正在停止核心…"
+	if disableProxy {
+		op = a.controller.StopAndDisableProxy
+		label = "正在关闭系统代理并停止核心…"
+	}
+	a.run(label, op, false, func(err error) {
 		if err == nil && exitAfter {
 			a.quit()
 		}
@@ -391,7 +396,6 @@ func (a *app) render() {
 	a.stop.SetEnabled(!a.busy && s.Running)
 	a.refresh.SetEnabled(!a.busy)
 	a.forget.SetEnabled(!a.busy && s.Settings.TUNEnabled != nil)
-	a.diagnostics.SetEnabled(!a.busy && s.Diagnostics != "")
 	a.web.SetEnabled(s.Running && s.WebURL != "")
 	for _, x := range a.mutations {
 		x.SetEnabled(!a.busy)
@@ -401,7 +405,6 @@ func (a *app) render() {
 	}
 	a.settingsBody.SetEnabled(!a.busy)
 	a.saveButton.SetEnabled(!a.busy)
-	a.diagnosticsButton.SetEnabled(!a.busy && s.Diagnostics != "")
 	a.tunButton.SetEnabled(a.tun.Enabled())
 	a.proxyButton.SetEnabled(a.proxy.Enabled())
 	a.startButton.SetEnabled(!a.busy)

@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tom2almighty/mitray/internal/config"
 	"github.com/tom2almighty/mitray/internal/mihomo"
 	"github.com/tom2almighty/mitray/internal/storage"
 )
+
+const defaultMihomoUA = "clash.meta"
 
 type source struct {
 	path       string
@@ -52,15 +55,67 @@ func prepareProfileSource(ctx context.Context, base string, profile config.Profi
 	}
 }
 
+func remoteCacheName(address string) string {
+	hash := sha256.Sum256([]byte(address))
+	return fmt.Sprintf("%x.yaml", hash[:16])
+}
+
+func isRemoteCacheFilename(name string) bool {
+	if !strings.HasSuffix(name, ".yaml") || len(name) != 32+len(".yaml") {
+		return false
+	}
+	for _, c := range name[:32] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func pruneRemoteCache(base string, profiles map[string]config.Profile) {
+	dir := filepath.Join(base, "cache")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	keep := make(map[string]struct{}, len(profiles))
+	for _, p := range profiles {
+		if p.Type == config.ProfileURL && p.URL != "" {
+			keep[remoteCacheName(p.URL)] = struct{}{}
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !isRemoteCacheFilename(name) {
+			continue
+		}
+		if _, ok := keep[name]; !ok {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
+func resolveDownloadUA(cachePath string) string {
+	if cached, err := os.ReadFile(cachePath); err == nil {
+		if conn, err := mihomo.ReadConnection(cached); err == nil && conn.GlobalUA != "" {
+			return conn.GlobalUA
+		}
+	}
+	return defaultMihomoUA
+}
+
 func prepareRemoteSource(ctx context.Context, base string, profile config.Profile, cachedOnly bool) (source, error) {
-	hash := sha256.Sum256([]byte(profile.URL))
-	path := filepath.Join(base, "cache", fmt.Sprintf("%x.yaml", hash[:16]))
+	path := filepath.Join(base, "cache", remoteCacheName(profile.URL))
 	var data []byte
 	var freshErr error
 	warning := ""
 
 	if !cachedOnly {
-		data, freshErr = download(ctx, profile.URL)
+		ua := resolveDownloadUA(path)
+		data, freshErr = download(ctx, profile.URL, ua)
 		if freshErr == nil {
 			if _, parseErr := mihomo.ReadConnection(data); parseErr != nil {
 				data, freshErr = nil, fmt.Errorf("远程配置内容无效: %w", parseErr)
@@ -68,9 +123,10 @@ func prepareRemoteSource(ctx context.Context, base string, profile config.Profil
 		}
 		if freshErr == nil {
 			if writeErr := storage.WriteFile(path, data); writeErr != nil {
-				warning = "远程配置缓存写入失败，本次仍使用新下载的配置: " + writeErr.Error()
+				data, freshErr = nil, fmt.Errorf("远程配置缓存写入失败: %w", writeErr)
 			}
-		} else {
+		}
+		if freshErr != nil {
 			warning = "远程配置未更新: " + freshErr.Error()
 		}
 	}
@@ -113,7 +169,7 @@ func cacheDescription(path string) string {
 	return "缓存（更新于 " + info.ModTime().Format("2006-01-02 15:04") + "）"
 }
 
-func download(ctx context.Context, address string) ([]byte, error) {
+func download(ctx context.Context, address, userAgent string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	tr := http.DefaultTransport.(*http.Transport).Clone()
@@ -123,6 +179,9 @@ func download(ctx context.Context, address string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
 		return nil, fmt.Errorf("远程配置地址无效")
+	}
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

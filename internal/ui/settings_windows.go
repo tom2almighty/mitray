@@ -132,7 +132,6 @@ func (a *app) createWindow() error {
 					}},
 					PushButton{AssignTo: &a.tunButton, Text: "切换 TUN", OnClicked: func() { a.run("正在切换 TUN…", a.controller.ToggleTUN, false, nil) }},
 					PushButton{AssignTo: &a.proxyButton, Text: "切换系统代理", OnClicked: func() { a.run("正在切换系统代理…", a.controller.ToggleProxy, false, nil) }},
-					PushButton{AssignTo: &a.diagnosticsButton, Text: "核心诊断…", OnClicked: a.showDiagnostics},
 					HSpacer{},
 				}},
 				Label{AssignTo: &a.memoryLabel, Text: "TUN 状态会在成功切换后自动记忆。", TextColor: systemMutedColor()},
@@ -147,6 +146,7 @@ func (a *app) createWindow() error {
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
 						Label{Text: "配置档案"},
 						ComboBox{AssignTo: &a.profileCombo, StretchFactor: 1, OnCurrentIndexChanged: a.profileChanged},
+						PushButton{AssignTo: &a.activateProfileButton, Text: "设为当前使用", OnClicked: a.activateEditingProfile},
 						PushButton{AssignTo: &a.deleteProfileButton, Text: "删除…", OnClicked: a.deleteProfile},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
@@ -213,6 +213,7 @@ func (a *app) fillSettings() {
 	}()
 	s := a.controller.Snapshot().Settings
 	a.draftProfiles = s.Clone().Profiles
+	a.draftActiveProfile = s.ActiveProfile
 	a.coreEdit.SetText(s.CorePath)
 	a.autoStart.SetChecked(s.AutoStartCore)
 	a.delay.SetValue(float64(s.StartupDelay))
@@ -277,6 +278,32 @@ func (a *app) updateProfileControls() {
 	a.localEdit.SetEnabled(hasProfile)
 	a.urlEdit.SetEnabled(hasProfile)
 	a.deleteProfileButton.SetEnabled(hasProfile && !a.busy)
+	if a.activateProfileButton != nil {
+		if hasProfile && a.editingProfile == a.draftActiveProfile {
+			a.activateProfileButton.SetText("当前使用中")
+			a.activateProfileButton.SetEnabled(false)
+		} else {
+			a.activateProfileButton.SetText("设为当前使用")
+			a.activateProfileButton.SetEnabled(hasProfile && !a.busy)
+		}
+	}
+}
+
+func (a *app) activateEditingProfile() {
+	if a.busy || a.editingProfile == "" {
+		return
+	}
+	if err := a.commitCurrentProfile(); err != nil {
+		a.feedback.SetText(err.Error())
+		return
+	}
+	if a.draftActiveProfile == a.editingProfile {
+		return
+	}
+	a.draftActiveProfile = a.editingProfile
+	a.updateProfileControls()
+	a.markDirty()
+	a.feedback.SetText("已设为当前使用配置，点击「保存并应用」后生效。")
 }
 
 func (a *app) refreshProfileModel(selected string) {
@@ -334,6 +361,9 @@ func (a *app) commitCurrentProfile() error {
 			return fmt.Errorf("配置名称 %q 已存在", name)
 		}
 		delete(a.draftProfiles, a.editingProfile)
+		if a.draftActiveProfile == a.editingProfile {
+			a.draftActiveProfile = name
+		}
 	}
 	profile := config.Profile{Type: config.ProfileLocal, Path: strings.TrimSpace(a.localEdit.Text())}
 	if a.sourceCombo.CurrentIndex() == 1 {
@@ -342,6 +372,7 @@ func (a *app) commitCurrentProfile() error {
 	a.draftProfiles[name] = profile
 	a.editingProfile = name
 	a.refreshProfileModel(name)
+	a.updateProfileControls()
 	return nil
 }
 
@@ -363,7 +394,6 @@ func (a *app) profileChanged() {
 		return
 	}
 	a.loadProfile(name, profile)
-	a.markDirty()
 }
 
 func (a *app) uniqueProfileName(base string) string {
@@ -401,9 +431,16 @@ func (a *app) addLocalProfile() {
 	name := a.uniqueProfileName(base)
 	profile := config.Profile{Type: config.ProfileLocal, Path: dlg.FilePath}
 	a.draftProfiles[name] = profile
+	if _, ok := a.draftProfiles[a.draftActiveProfile]; !ok {
+		a.draftActiveProfile = name
+	}
 	a.loadProfile(name, profile)
 	a.markDirty()
-	a.feedback.SetText("已添加本地配置，点击「保存并应用」后生效。")
+	if a.draftActiveProfile == name {
+		a.feedback.SetText("已添加本地配置，点击「保存并应用」后生效。")
+	} else {
+		a.feedback.SetText("已添加本地配置；如需切换为当前配置，请点击「设为当前使用」，然后保存。")
+	}
 }
 
 func (a *app) addRemoteProfile() {
@@ -417,6 +454,9 @@ func (a *app) addRemoteProfile() {
 	name := a.uniqueProfileName("remote")
 	profile := config.Profile{Type: config.ProfileURL}
 	a.draftProfiles[name] = profile
+	if _, ok := a.draftProfiles[a.draftActiveProfile]; !ok {
+		a.draftActiveProfile = name
+	}
 	a.loadProfile(name, profile)
 	a.markDirty()
 	a.feedback.SetText("已添加远程配置，请填写 URL 后保存。")
@@ -446,6 +486,9 @@ func (a *app) deleteProfile() {
 	}
 	sort.Strings(names)
 	next := names[0]
+	if a.draftActiveProfile == name {
+		a.draftActiveProfile = next
+	}
 	a.loadProfile(next, a.draftProfiles[next])
 	a.markDirty()
 }
@@ -495,7 +538,10 @@ func (a *app) saveSettings() {
 	for name, profile := range a.draftProfiles {
 		s.Profiles[name] = profile
 	}
-	s.ActiveProfile = a.editingProfile
+	s.ActiveProfile = a.draftActiveProfile
+	if _, ok := s.Profiles[s.ActiveProfile]; !ok {
+		s.ActiveProfile = a.editingProfile
+	}
 	for name, profile := range s.Profiles {
 		if err := profile.Validate(a.base); err != nil {
 			a.feedback.SetText(fmt.Sprintf("配置档案 %q 无效: %v", name, err))
@@ -512,28 +558,4 @@ func (a *app) saveSettings() {
 			a.feedback.SetText("设置已保存。关闭此窗口后，MiTray 会继续在托盘运行。")
 		}
 	})
-}
-
-func (a *app) showDiagnostics() {
-	text := a.controller.Snapshot().Diagnostics
-	if text == "" {
-		walk.MsgBox(a.window, "核心诊断", "当前没有可用的核心输出。", walk.MsgBoxOK|walk.MsgBoxIconInformation)
-		return
-	}
-	var dlg *walk.Dialog
-	_, err := (Dialog{
-		AssignTo: &dlg, Title: "mihomo 核心诊断", Size: Size{Width: 760, Height: 500},
-		Font:   systemMessageFont(false),
-		Layout: VBox{Margins: Margins{Left: 16, Top: 16, Right: 16, Bottom: 16}, Spacing: 10},
-		Children: []Widget{
-			TextLabel{Text: "输出仅保存在内存中，不写入文件；退出 MiTray 后清除。"},
-			TextEdit{Text: text, ReadOnly: true, VScroll: true, HScroll: true, StretchFactor: 1},
-			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-				HSpacer{}, PushButton{Text: "关闭", OnClicked: func() { dlg.Close(walk.DlgCmdOK) }},
-			}},
-		},
-	}).Run(a.window)
-	if err != nil {
-		a.feedback.SetText("打开核心诊断失败: " + err.Error())
-	}
 }

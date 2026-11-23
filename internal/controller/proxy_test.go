@@ -128,3 +128,21 @@ func TestSnapshotRevisionOnlyChangesWithContentView(t *testing.T) {
 		t.Fatalf("changed snapshot did not increase revision: %d -> %d", revision, got)
 	}
 }
+
+func TestStopAndDisableProxyDisablesProxyAndStopsCore(t *testing.T) {
+	c, _, core, system, _ := fixture(t, false, nil)
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	system.proxy, system.server = true, "127.0.0.1:7890"
+	if err := c.StopAndDisableProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if system.proxy || core.pid != 0 || core.stops != 1 {
+		t.Fatalf("StopAndDisableProxy state: proxy=%t pid=%d stops=%d", system.proxy, core.pid, core.stops)
+	}
+	if c.Snapshot().Running || c.Snapshot().ProxyTargetsCore {
+		t.Fatal("snapshot still shows running or proxy targeting core")
+	}
+}

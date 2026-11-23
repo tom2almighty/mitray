@@ -73,6 +73,8 @@ func Open(target string) error {
 
 func IsAdmin() bool { return windows.GetCurrentProcessToken().IsElevated() }
 
+func (System) IsAdmin() bool { return IsAdmin() }
+
 // Hold the mutex for the lifetime of the UI. The caller brings the existing
 // settings window to the foreground on a second launch.
 func SingleInstance(name string) (windows.Handle, bool, error) {

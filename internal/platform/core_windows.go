@@ -6,21 +6,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-type Core struct {
-	runs sync.Map
-}
-
-type coreRun struct {
-	executable string
-	output     *outputBuffer
-}
+type Core struct{}
 
 func NewCore() *Core { return &Core{} }
 
@@ -33,20 +25,23 @@ func imagePath(h windows.Handle) (string, error) {
 	return windows.UTF16ToString(b[:n]), nil
 }
 
+func canonicalPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Clean(p)
+}
+
 func samePath(a, b string) bool {
-	if p, err := filepath.EvalSymlinks(a); err == nil {
-		a = p
-	}
-	if p, err := filepath.EvalSymlinks(b); err == nil {
-		b = p
-	}
-	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	return strings.EqualFold(canonicalPath(a), canonicalPath(b))
 }
 
 func (*Core) Find(executable string) (int, error) {
 	if executable == "" {
 		return 0, nil
 	}
+	target := canonicalPath(executable)
+	baseName := filepath.Base(executable)
 	h, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return 0, err
@@ -56,7 +51,7 @@ func (*Core) Find(executable string) (int, error) {
 	var found int
 	var accessErr error
 	for err = windows.Process32First(h, &entry); err == nil; err = windows.Process32Next(h, &entry) {
-		if !strings.EqualFold(windows.UTF16ToString(entry.ExeFile[:]), filepath.Base(executable)) {
+		if !strings.EqualFold(windows.UTF16ToString(entry.ExeFile[:]), baseName) {
 			continue
 		}
 		p, openErr := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, entry.ProcessID)
@@ -74,7 +69,7 @@ func (*Core) Find(executable string) (int, error) {
 			}
 			continue
 		}
-		if samePath(path, executable) {
+		if strings.EqualFold(canonicalPath(path), target) {
 			if found != 0 {
 				return 0, errors.New("所选核心有多个运行实例，请先关闭多余实例")
 			}
@@ -90,31 +85,16 @@ func (*Core) Find(executable string) (int, error) {
 	return found, nil
 }
 
-func (c *Core) Start(executable, configPath, directory string) (int, error) {
+func (*Core) Start(executable, configPath, directory string) (int, error) {
 	cmd := exec.Command(executable, "-d", directory, "-f", configPath)
 	cmd.Dir = directory
-	output := newOutputBuffer(32 << 10)
-	cmd.Stdout = output
-	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
 	pid := cmd.Process.Pid
-	c.runs.Range(func(key, _ any) bool {
-		c.runs.Delete(key)
-		return true
-	})
-	c.runs.Store(pid, coreRun{executable: executable, output: output})
 	go func() {
-		waitErr := cmd.Wait()
-		message := "\n[MiTray] mihomo 已退出"
-		if cmd.ProcessState != nil {
-			message += fmt.Sprintf("，退出码 %d", cmd.ProcessState.ExitCode())
-		} else if waitErr != nil {
-			message += ": " + waitErr.Error()
-		}
-		_, _ = output.Write([]byte(message + "\n"))
+		_ = cmd.Wait()
 	}()
 	return pid, nil
 }
@@ -166,19 +146,4 @@ func (*Core) Stop(pid int, executable string) error {
 		return errors.New("等待旧核心退出超时")
 	}
 	return nil
-}
-
-func (c *Core) Output(pid int, executable string) string {
-	value, ok := c.runs.Load(pid)
-	if !ok {
-		return ""
-	}
-	run, ok := value.(coreRun)
-	if !ok {
-		return ""
-	}
-	if !samePath(run.executable, executable) {
-		return ""
-	}
-	return run.output.String()
 }

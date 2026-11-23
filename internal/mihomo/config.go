@@ -15,24 +15,72 @@ type Connection struct {
 	Endpoint  string
 	Secret    string
 	ProxyPort int
+	HasTUN    bool
+	GlobalUA  string
+}
+
+type rawListener struct {
+	Type   string `yaml:"type"`
+	Port   int    `yaml:"port"`
+	Listen string `yaml:"listen"`
+}
+
+func validPort(p int) bool {
+	return p >= 1 && p <= 65535
+}
+
+func isLocalListen(listen string) bool {
+	host := strings.ToLower(strings.Trim(strings.TrimSpace(listen), "[]"))
+	switch host {
+	case "", "0.0.0.0", "::", "*", "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func pickProxyPort(mixedPort, port int, listeners []rawListener) int {
+	if validPort(mixedPort) {
+		return mixedPort
+	}
+	if validPort(port) {
+		return port
+	}
+	var httpPort int
+	for _, l := range listeners {
+		if !validPort(l.Port) || !isLocalListen(l.Listen) {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(l.Type)) {
+		case "mixed":
+			return l.Port
+		case "http":
+			if httpPort == 0 {
+				httpPort = l.Port
+			}
+		}
+	}
+	return httpPort
 }
 
 func ReadConnection(data []byte) (Connection, error) {
 	var raw struct {
-		Controller string `yaml:"external-controller"`
-		Secret     string `yaml:"secret"`
-		MixedPort  int    `yaml:"mixed-port"`
-		Port       int    `yaml:"port"`
+		Controller string        `yaml:"external-controller"`
+		Secret     string        `yaml:"secret"`
+		MixedPort  int           `yaml:"mixed-port"`
+		Port       int           `yaml:"port"`
+		Listeners  []rawListener `yaml:"listeners"`
+		GlobalUA   string        `yaml:"global-ua"`
+		TUN        *yaml.Node    `yaml:"tun"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return Connection{}, fmt.Errorf("读取 API 连接信息: %w", err)
 	}
-	port := raw.MixedPort
-	if port == 0 {
-		port = raw.Port
-	}
+	port := pickProxyPort(raw.MixedPort, raw.Port, raw.Listeners)
+	hasTUN := raw.TUN != nil && raw.TUN.Tag != "!!null"
+	ua := strings.TrimSpace(raw.GlobalUA)
 	if raw.Controller == "" {
-		return Connection{Secret: raw.Secret, ProxyPort: port}, nil
+		return Connection{Secret: raw.Secret, ProxyPort: port, HasTUN: hasTUN, GlobalUA: ua}, nil
 	}
 	endpoint := raw.Controller
 	if !strings.Contains(endpoint, "://") {
@@ -55,10 +103,19 @@ func ReadConnection(data []byte) (Connection, error) {
 			return Connection{}, fmt.Errorf("external-controller 端口无效")
 		}
 	}
-	return Connection{Endpoint: strings.TrimRight(u.String(), "/"), Secret: raw.Secret, ProxyPort: port}, nil
+	return Connection{
+		Endpoint:  strings.TrimRight(u.String(), "/"),
+		Secret:    raw.Secret,
+		ProxyPort: port,
+		HasTUN:    hasTUN,
+		GlobalUA:  ua,
+	}, nil
 }
 
 func (c Connection) WebURL() string {
+	if c.Endpoint == "" {
+		return ""
+	}
 	u, err := url.Parse(c.Endpoint + "/ui/")
 	if err != nil {
 		return ""

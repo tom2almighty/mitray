@@ -22,7 +22,6 @@ type fakeCore struct {
 	starts, stops int
 	events        []string
 	onAlive       func()
-	output        string
 }
 
 func (f *fakeCore) Find(string) (int, error) { return f.pid, nil }
@@ -44,13 +43,13 @@ func (f *fakeCore) Alive(pid int, exe string) bool {
 	}
 	return pid != 0 && pid == f.pid
 }
-func (f *fakeCore) Output(int, string) string { return f.output }
 
 type fakeSystem struct {
 	proxy   bool
 	server  string
 	changes int
 	level   string
+	admin   bool
 }
 
 func (f *fakeSystem) Proxy() (bool, string, error) { return f.proxy, f.server, nil }
@@ -64,6 +63,7 @@ func (f *fakeSystem) SetProxy(b bool, p int) error {
 }
 func (f *fakeSystem) Startup() (string, error)         { return "off", nil }
 func (f *fakeSystem) SetStartup(l string, d int) error { f.level = l; return nil }
+func (f *fakeSystem) IsAdmin() bool                    { return f.admin }
 
 type fakeStore struct {
 	saved []config.Settings
@@ -160,7 +160,7 @@ func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFix
 	cfg.CorePath = exe
 	cfg.Profiles["default"] = config.Profile{Type: config.ProfileLocal, Path: path}
 	cfg.TUNEnabled = remembered
-	core, system, store := &fakeCore{}, &fakeSystem{}, &fakeStore{}
+	core, system, store := &fakeCore{}, &fakeSystem{admin: true}, &fakeStore{}
 	c := New(base, cfg, store, core, system)
 	c.readyTimeout = time.Second
 	c.retryInterval = time.Millisecond
@@ -341,6 +341,99 @@ func TestConcurrentTogglesAreSerialized(t *testing.T) {
 	wg.Wait()
 	if api.enabled || len(store.saved) != 10 {
 		t.Fatalf("lost toggles: state=%t saves=%d", api.enabled, len(store.saved))
+	}
+}
+
+func TestNonAdminFastFailsEnableTUN(t *testing.T) {
+	t.Run("boot restore", func(t *testing.T) {
+		c, api, _, system, _ := fixture(t, false, ptr(true))
+		system.admin = false
+		err := c.Boot(context.Background())
+		if !errors.Is(err, ErrTUNRestore) || !strings.Contains(err.Error(), "管理员") {
+			t.Fatalf("expected non-admin restore error, got %v", err)
+		}
+		if api.patches != 0 {
+			t.Fatalf("non-admin restore sent %d PATCH requests, want 0", api.patches)
+		}
+	})
+
+	t.Run("manual toggle", func(t *testing.T) {
+		c, api, _, system, store := fixture(t, false, nil)
+		system.admin = false
+		ctx := context.Background()
+		if err := c.Boot(ctx); err != nil {
+			t.Fatal(err)
+		}
+		err := c.ToggleTUN(ctx)
+		if err == nil || !strings.Contains(err.Error(), "管理员") {
+			t.Fatalf("expected non-admin toggle error, got %v", err)
+		}
+		if api.patches != 0 || len(store.saved) != 0 {
+			t.Fatalf("non-admin toggle sent %d patches or saved %d times", api.patches, len(store.saved))
+		}
+	})
+}
+
+func TestMissingTUNSectionHintWhenPATCHDoesNotEnable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(204)
+			return
+		}
+		_, _ = w.Write([]byte(`{"tun":{"enable":false},"mixed-port":7890}`))
+	}))
+	defer srv.Close()
+
+	base := t.TempDir()
+	exe := filepath.Join(base, "mihomo.exe")
+	path := filepath.Join(base, "config.yaml")
+	if err := os.WriteFile(exe, []byte("fake"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("external-controller: %s\nmixed-port: 7890\n", srv.URL)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.CorePath = exe
+	cfg.Profiles["default"] = config.Profile{Type: config.ProfileLocal, Path: path}
+	c := New(base, cfg, &fakeStore{}, &fakeCore{}, &fakeSystem{admin: true})
+	c.readyTimeout = time.Second
+	c.retryInterval = time.Millisecond
+	defer func() {
+		if c.client != nil {
+			c.client.Close()
+		}
+	}()
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	err := c.ToggleTUN(ctx)
+	if err == nil || !strings.Contains(err.Error(), "未包含 tun 段落") {
+		t.Fatalf("expected missing tun section hint, got %v", err)
+	}
+}
+
+func TestStopDisablesActiveTUNBeforeStoppingCore(t *testing.T) {
+	c, api, core, _, store := fixture(t, false, ptr(true))
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !api.enabled {
+		t.Fatal("expected TUN enabled after boot")
+	}
+	if err := c.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if api.enabled {
+		t.Fatal("Stop did not disable active TUN before terminating core")
+	}
+	if core.stops != 1 {
+		t.Fatalf("expected 1 core stop, got %d", core.stops)
+	}
+	if c.Snapshot().Settings.TUNEnabled == nil || !*c.Snapshot().Settings.TUNEnabled || len(store.saved) != 0 {
+		t.Fatal("Stop must preserve TUN memory without modifying settings")
 	}
 }
 

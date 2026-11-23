@@ -60,45 +60,37 @@ func decodeOutput(b []byte) []byte {
 	return bytes.ReplaceAll(b, []byte(`encoding="UTF-16"`), []byte(`encoding="UTF-8"`))
 }
 
+type taskInfo struct {
+	level   string
+	command string
+}
+
 func (s System) Startup() (string, error) {
-	level, exists, err := queryTask(s.taskName())
+	info, exists, err := queryTask(s.taskName())
 	if err != nil {
 		return "", err
 	}
 	if exists {
-		if !taskCommandMatches(s.taskName(), s.Executable) {
+		if !samePath(info.command, s.Executable) {
 			return "", fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
 		}
-		return level, nil
+		return info.level, nil
 	}
 	legacy := legacyTaskName(s.Executable)
 	if legacy == s.taskName() {
 		return "off", nil
 	}
-	level, exists, err = queryTask(legacy)
+	info, exists, err = queryTask(legacy)
 	if err != nil {
 		return "", err
 	}
-	if !exists || !taskCommandMatches(legacy, s.Executable) {
+	if !exists || !samePath(info.command, s.Executable) {
 		return "off", nil
 	}
-	return level, nil
+	return info.level, nil
 }
 
-func queryTask(name string) (level string, exists bool, err error) {
-	output, err := schtasks("/Query", "/TN", name, "/XML")
-	if err != nil {
-		// Check whether the task exists using a successful enumeration. A denied
-		// query must not silently turn an existing administrator task into "off".
-		all, listErr := schtasks("/Query", "/FO", "CSV", "/NH")
-		if listErr != nil {
-			return "", false, fmt.Errorf("无法查询任务计划程序")
-		}
-		if !taskListed(all, name) {
-			return "", false, nil
-		}
-		return "", true, fmt.Errorf("无法读取已有自启任务，请以管理员身份运行 MiTray")
-	}
+func parseTaskXML(data []byte) (taskInfo, error) {
 	var task struct {
 		Principals struct {
 			Principal struct {
@@ -108,39 +100,47 @@ func queryTask(name string) (level string, exists bool, err error) {
 		Settings struct {
 			Enabled string `xml:"Enabled"`
 		} `xml:"Settings"`
-	}
-	if err := xml.Unmarshal(decodeOutput(output), &task); err != nil {
-		return "", true, fmt.Errorf("读取自启任务: %w", err)
-	}
-	if task.Settings.Enabled == "false" {
-		return "off", true, nil
-	}
-	if task.Principals.Principal.RunLevel == "HighestAvailable" {
-		return "admin", true, nil
-	}
-	return "normal", true, nil
-}
-
-func taskListed(output []byte, name string) bool {
-	return strings.Contains(strings.ToLower(string(decodeOutput(output))), strings.ToLower(`\`+name)+`"`)
-}
-
-func taskCommandMatches(name, executable string) bool {
-	output, err := schtasks("/Query", "/TN", name, "/XML")
-	if err != nil {
-		return false
-	}
-	var task struct {
 		Actions struct {
 			Exec struct {
 				Command string `xml:"Command"`
 			} `xml:"Exec"`
 		} `xml:"Actions"`
 	}
-	if xml.Unmarshal(decodeOutput(output), &task) != nil {
-		return false
+	if err := xml.Unmarshal(decodeOutput(data), &task); err != nil {
+		return taskInfo{}, fmt.Errorf("读取自启任务: %w", err)
 	}
-	return samePath(task.Actions.Exec.Command, executable)
+	level := "normal"
+	if task.Settings.Enabled == "false" {
+		level = "off"
+	} else if task.Principals.Principal.RunLevel == "HighestAvailable" {
+		level = "admin"
+	}
+	return taskInfo{level: level, command: task.Actions.Exec.Command}, nil
+}
+
+func queryTask(name string) (info taskInfo, exists bool, err error) {
+	output, err := schtasks("/Query", "/TN", name, "/XML")
+	if err != nil {
+		// Check whether the task exists using a successful enumeration. A denied
+		// query must not silently turn an existing administrator task into "off".
+		all, listErr := schtasks("/Query", "/FO", "CSV", "/NH")
+		if listErr != nil {
+			return taskInfo{}, false, fmt.Errorf("无法查询任务计划程序")
+		}
+		if !taskListed(all, name) {
+			return taskInfo{}, false, nil
+		}
+		return taskInfo{}, true, fmt.Errorf("无法读取已有自启任务，请以管理员身份运行 MiTray")
+	}
+	info, err = parseTaskXML(output)
+	if err != nil {
+		return taskInfo{}, true, err
+	}
+	return info, true, nil
+}
+
+func taskListed(output []byte, name string) bool {
+	return strings.Contains(strings.ToLower(string(decodeOutput(output))), strings.ToLower(`\`+name)+`"`)
 }
 
 func xmlText(s string) string {
@@ -165,29 +165,24 @@ func taskXML(userID, executable, level string, delay int) string {
 
 func (s System) SetStartup(level string, delay int) error {
 	currentName := s.taskName()
-	currentExists, ownedCurrent, err := taskOwnership(currentName, s.Executable)
+	currentInfo, currentExists, err := queryTask(currentName)
 	if err != nil {
 		return err
 	}
-	if currentExists && !ownedCurrent {
+	if currentExists && !samePath(currentInfo.command, s.Executable) {
 		return fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
 	}
+	ownedLegacy, err := s.ownedLegacyTask()
+	if err != nil {
+		return err
+	}
 	if level == "" || level == "off" {
-		current, err := s.Startup()
-		if err != nil {
-			return err
+		if currentExists {
+			if err := deleteTask(currentName); err != nil {
+				return err
+			}
 		}
-		if current == "off" {
-			return nil
-		}
-		if err := deleteTaskIfExists(s.taskName()); err != nil {
-			return err
-		}
-		owned, err := s.ownedLegacyTask()
-		if err != nil {
-			return err
-		}
-		if owned {
+		if ownedLegacy {
 			return deleteTask(legacyTaskName(s.Executable))
 		}
 		return nil
@@ -195,11 +190,7 @@ func (s System) SetStartup(level string, delay int) error {
 	if level != "admin" && level != "normal" {
 		return fmt.Errorf("无效的自启选项")
 	}
-	owned, err := s.ownedLegacyTask()
-	if err != nil {
-		return err
-	}
-	if owned {
+	if ownedLegacy {
 		if err := deleteTask(legacyTaskName(s.Executable)); err != nil {
 			return err
 		}
@@ -235,27 +226,16 @@ func (s System) SetStartup(level string, delay int) error {
 	return nil
 }
 
-func taskOwnership(name, executable string) (bool, bool, error) {
-	_, exists, err := queryTask(name)
-	if err != nil || !exists {
-		return exists, false, err
-	}
-	return true, taskCommandMatches(name, executable), nil
-}
-
 func (s System) ownedLegacyTask() (bool, error) {
 	legacy := legacyTaskName(s.Executable)
 	if legacy == s.taskName() {
 		return false, nil
 	}
-	_, exists, err := queryTask(legacy)
-	if err != nil {
+	info, exists, err := queryTask(legacy)
+	if err != nil || !exists {
 		return false, err
 	}
-	if !exists {
-		return false, nil
-	}
-	return taskCommandMatches(legacy, s.Executable), nil
+	return samePath(info.command, s.Executable), nil
 }
 
 func deleteTask(name string) error {
@@ -263,15 +243,4 @@ func deleteTask(name string) error {
 		return fmt.Errorf("删除自启任务失败，请以管理员身份运行 MiTray: %w", err)
 	}
 	return nil
-}
-
-func deleteTaskIfExists(name string) error {
-	_, exists, err := queryTask(name)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return nil
-	}
-	return deleteTask(name)
 }

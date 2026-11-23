@@ -46,7 +46,7 @@ func TestRemoteCorruptDownloadFallsBackToValidCache(t *testing.T) {
 	}
 }
 
-func TestRemoteCacheWriteFailureStillUsesFreshConfig(t *testing.T) {
+func TestRemoteCacheWriteFailureWithoutCacheReportsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("mixed-port: 7892\n"))
 	}))
@@ -56,15 +56,69 @@ func TestRemoteCacheWriteFailureStillUsesFreshConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "cache"), []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	src, err := prepareProfileSource(context.Background(), base, config.Profile{Type: config.ProfileURL, URL: srv.URL}, false)
-	if err != nil {
+	_, err := prepareProfileSource(context.Background(), base, config.Profile{Type: config.ProfileURL, URL: srv.URL}, false)
+	if err == nil {
+		t.Fatal("expected error when cache write fails and no fallback cache exists")
+	}
+	if !strings.Contains(err.Error(), "远程配置缓存写入失败") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRemoteDownloadUsesMihomoUAAndCachedGlobalUA(t *testing.T) {
+	var seenUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte("mixed-port: 7890\nglobal-ua: clash.meta/custom\n"))
+	}))
+	defer srv.Close()
+
+	base := t.TempDir()
+	profile := config.Profile{Type: config.ProfileURL, URL: srv.URL}
+	if _, err := prepareProfileSource(context.Background(), base, profile, false); err != nil {
 		t.Fatal(err)
 	}
-	if src.connection.ProxyPort != 7892 {
-		t.Fatalf("fresh config was discarded: %+v", src)
+	if seenUA != defaultMihomoUA {
+		t.Fatalf("first download UA = %q, want %q", seenUA, defaultMihomoUA)
 	}
-	if !strings.Contains(src.warning, "缓存写入失败") {
-		t.Fatalf("missing cache warning: %s", src.warning)
+	if _, err := prepareProfileSource(context.Background(), base, profile, false); err != nil {
+		t.Fatal(err)
+	}
+	if seenUA != "clash.meta/custom" {
+		t.Fatalf("second download UA = %q, want clash.meta/custom", seenUA)
+	}
+}
+
+func TestPruneRemoteCacheRemovesOnlyOrphans(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "cache")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	activeURL := "https://example.com/active.yaml"
+	orphanURL := "https://example.com/orphan.yaml"
+	activeFile := remoteCachePath(base, activeURL)
+	orphanFile := remoteCachePath(base, orphanURL)
+	otherFile := filepath.Join(dir, "readme.txt")
+	for _, f := range []string{activeFile, orphanFile, otherFile} {
+		if err := os.WriteFile(f, []byte("test"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pruneRemoteCache(base, map[string]config.Profile{
+		"a": {Type: config.ProfileURL, URL: activeURL},
+		"b": {Type: config.ProfileLocal, Path: "local.yaml"},
+	})
+
+	if _, err := os.Stat(activeFile); err != nil {
+		t.Fatalf("active cache removed: %v", err)
+	}
+	if _, err := os.Stat(orphanFile); !os.IsNotExist(err) {
+		t.Fatalf("orphan cache was not removed: %v", err)
+	}
+	if _, err := os.Stat(otherFile); err != nil {
+		t.Fatalf("unrelated file removed: %v", err)
 	}
 }
 
