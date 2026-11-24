@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/tom2almighty/mitray/internal/i18n"
 )
 
 // WriteFile never truncates the previous configuration on a failed write.
@@ -21,7 +23,7 @@ func WriteFile(path string, data []byte) error {
 	}
 	closeErr := f.Close()
 	if err != nil {
-		return fmt.Errorf("写入配置: %w", err)
+		return fmt.Errorf(i18n.T().ErrWriteConfig, err)
 	}
 	if closeErr != nil {
 		return closeErr

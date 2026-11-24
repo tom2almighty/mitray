@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"golang.org/x/sys/windows"
 )
 
@@ -71,7 +72,7 @@ func (*Core) Find(executable string) (int, error) {
 		}
 		if strings.EqualFold(canonicalPath(path), target) {
 			if found != 0 {
-				return 0, errors.New("所选核心有多个运行实例，请先关闭多余实例")
+				return 0, errors.New(i18n.T().ErrMultipleCores)
 			}
 			found = int(entry.ProcessID)
 		}
@@ -80,7 +81,7 @@ func (*Core) Find(executable string) (int, error) {
 		return 0, err
 	}
 	if found == 0 && accessErr != nil {
-		return 0, fmt.Errorf("无法识别同名核心进程，请以管理员身份运行 MiTray: %w", accessErr)
+		return 0, fmt.Errorf(i18n.T().ErrIdentifyCoreAdmin, accessErr)
 	}
 	return found, nil
 }
@@ -133,7 +134,7 @@ func (*Core) Stop(pid int, executable string) error {
 		return err
 	}
 	if !samePath(path, executable) {
-		return errors.New("进程已变化，取消停止以避免关闭其他程序")
+		return errors.New(i18n.T().ErrProcessChanged)
 	}
 	if err := windows.TerminateProcess(h, 0); err != nil {
 		return err
@@ -143,7 +144,7 @@ func (*Core) Stop(pid int, executable string) error {
 		return err
 	}
 	if result == uint32(windows.WAIT_TIMEOUT) {
-		return errors.New("等待旧核心退出超时")
+		return errors.New(i18n.T().ErrStopCoreTimeout)
 	}
 	return nil
 }

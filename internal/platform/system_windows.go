@@ -5,6 +5,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -32,7 +33,7 @@ func (System) Proxy() (bool, string, error) {
 
 func (System) SetProxy(enabled bool, port int) error {
 	if enabled && (port < 1 || port > 65535) {
-		return fmt.Errorf("mihomo 没有可用的 mixed-port 或 port")
+		return fmt.Errorf("%s", i18n.T().ErrNoProxyPort)
 	}
 	k, err := registry.OpenKey(registry.CURRENT_USER, internetSettings, registry.SET_VALUE)
 	if err != nil {
@@ -56,7 +57,7 @@ func (System) SetProxy(enabled bool, port int) error {
 	for _, option := range []uintptr{39, 37} {
 		r, _, err := fn.Call(0, option, 0, 0)
 		if r == 0 {
-			return fmt.Errorf("代理已写入，通知 Windows 刷新失败: %w", err)
+			return fmt.Errorf(i18n.T().ErrRefreshWinProxy, err)
 		}
 	}
 	return nil

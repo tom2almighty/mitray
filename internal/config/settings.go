@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"github.com/tom2almighty/mitray/internal/storage"
 )
 
@@ -29,6 +30,7 @@ type Settings struct {
 	CorePath      string
 	ActiveProfile string
 	AutoStartCore bool
+	Language      string
 	Profiles      map[string]Profile
 }
 
@@ -41,12 +43,14 @@ type fileCore struct {
 	Path          string `toml:"path"`
 	ActiveProfile string `toml:"active_profile"`
 	AutoStart     bool   `toml:"auto_start"`
+	Language      string `toml:"language"`
 }
 
 func Default() Settings {
 	return Settings{
 		ActiveProfile: "default",
 		AutoStartCore: true,
+		Language:      i18n.Auto,
 		Profiles: map[string]Profile{
 			"default": {Type: ProfileLocal},
 		},
@@ -89,40 +93,43 @@ func (p Profile) Validate(base string) error {
 	case ProfileURL:
 		u, err := url.Parse(p.URL)
 		if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-			return fmt.Errorf("远程配置地址必须是完整的 HTTP 或 HTTPS URL")
+			return fmt.Errorf("%s", i18n.T().ErrRemoteURLInvalid)
 		}
 		return nil
 	default:
-		return fmt.Errorf("配置来源类型必须是 local 或 url")
+		return fmt.Errorf("%s", i18n.T().ErrProfileTypeInvalid)
 	}
 }
 
 func (s Settings) Validate(base string) error {
 	if err := regularFile(resolvePath(base, s.CorePath)); err != nil {
-		return fmt.Errorf("请选择有效的 mihomo 核心文件: %w", err)
+		return fmt.Errorf(i18n.T().ErrInvalidCoreFile, err)
 	}
 	if err := ValidateProfileName(s.ActiveProfile); err != nil {
 		return err
 	}
 	profile, ok := s.ActiveProfileConfig()
 	if !ok {
-		return fmt.Errorf("请选择有效的 mihomo 配置档案")
+		return fmt.Errorf("%s", i18n.T().ErrSelectProfile)
 	}
 	if err := profile.Validate(base); err != nil {
-		return fmt.Errorf("请选择有效的 mihomo 配置档案: %w", err)
+		return fmt.Errorf(i18n.T().ErrInvalidProfile, err)
+	}
+	if _, ok := i18n.Normalize(s.Language); !ok {
+		return fmt.Errorf("%s", i18n.T().ErrInvalidLanguage)
 	}
 	return nil
 }
 
 func ValidateProfileName(name string) error {
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("配置名称不能为空")
+		return fmt.Errorf("%s", i18n.T().ErrProfileNameEmpty)
 	}
 	if name != strings.TrimSpace(name) {
-		return fmt.Errorf("配置名称首尾不能包含空白")
+		return fmt.Errorf("%s", i18n.T().ErrProfileNameSpaces)
 	}
 	if strings.ContainsAny(name, "\r\n\x00") {
-		return fmt.Errorf("配置名称不能包含换行或空字符")
+		return fmt.Errorf("%s", i18n.T().ErrProfileNameControl)
 	}
 	return nil
 }
@@ -139,14 +146,14 @@ func resolvePath(base, path string) string {
 
 func regularFile(path string) error {
 	if path == "" {
-		return fmt.Errorf("路径为空")
+		return fmt.Errorf("%s", i18n.T().ErrEmptyPath)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		return fmt.Errorf("所选路径是文件夹")
+		return fmt.Errorf("%s", i18n.T().ErrPathIsDir)
 	}
 	return nil
 }
@@ -155,24 +162,29 @@ type Store struct{ Path string }
 
 func (s Settings) fileSettings() fileSettings {
 	profiles := make(map[string]Profile, len(s.Profiles))
-	for name, profile := range s.Profiles {
-		profiles[name] = profile
+	maps.Copy(profiles, s.Profiles)
+	lang, ok := i18n.Normalize(s.Language)
+	if !ok {
+		lang = i18n.Auto
 	}
 	return fileSettings{
-		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile, AutoStart: s.AutoStartCore},
+		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile, AutoStart: s.AutoStartCore, Language: lang},
 		Profiles: profiles,
 	}
 }
 
 func (f fileSettings) settings() Settings {
 	profiles := make(map[string]Profile, len(f.Profiles))
-	for name, profile := range f.Profiles {
-		profiles[name] = profile
+	maps.Copy(profiles, f.Profiles)
+	lang := f.Core.Language
+	if lang == "" {
+		lang = i18n.Auto
 	}
 	return Settings{
 		CorePath:      f.Core.Path,
 		ActiveProfile: f.Core.ActiveProfile,
 		AutoStartCore: f.Core.AutoStart,
+		Language:      lang,
 		Profiles:      profiles,
 	}
 }
@@ -186,19 +198,19 @@ func (st Store) Load() (Settings, error) {
 		return Default(), err
 	}
 	file := fileSettings{
-		Core:     fileCore{ActiveProfile: "default", AutoStart: true},
+		Core:     fileCore{ActiveProfile: "default", AutoStart: true, Language: i18n.Auto},
 		Profiles: map[string]Profile{},
 	}
 	metadata, err := toml.Decode(string(data), &file)
 	if err != nil {
-		return Default(), fmt.Errorf("解析 %s: %w", filepath.Base(st.Path), err)
+		return Default(), fmt.Errorf(i18n.T().ErrParseFile, filepath.Base(st.Path), err)
 	}
 	if keys := metadata.Undecoded(); len(keys) > 0 {
 		names := make([]string, 0, len(keys))
 		for _, key := range keys {
 			names = append(names, key.String())
 		}
-		return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
+		return Default(), fmt.Errorf(i18n.T().ErrUnknownKeys, filepath.Base(st.Path), strings.Join(names, ", "))
 	}
 	return file.settings(), nil
 }
@@ -206,9 +218,7 @@ func (st Store) Load() (Settings, error) {
 func (st Store) Save(s Settings) error {
 	data, err := toml.Marshal(s.fileSettings())
 	if err != nil {
-		return fmt.Errorf("生成 %s: %w", filepath.Base(st.Path), err)
+		return fmt.Errorf(i18n.T().ErrMarshalFile, filepath.Base(st.Path), err)
 	}
-	const header = "# MiTray 配置。相对路径以 MiTray 所在目录为准。\n" +
-		"# type = \"local\" 使用 path；type = \"url\" 使用 url，远程配置缓存到 cache/。\n\n"
-	return storage.WriteFile(st.Path, append([]byte(header), data...))
+	return storage.WriteFile(st.Path, append([]byte(i18n.T().TOMLHeader), data...))
 }

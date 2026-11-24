@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"golang.org/x/sys/windows"
 )
 
@@ -76,7 +77,7 @@ func (s System) Startup() (string, int, error) {
 	}
 	if exists {
 		if !samePath(info.command, s.Executable) {
-			return "", DefaultStartupDelay, fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
+			return "", DefaultStartupDelay, fmt.Errorf("%s", i18n.T().ErrTaskNameOccupied)
 		}
 		return info.level, info.delay, nil
 	}
@@ -159,7 +160,7 @@ func parseTaskXML(data []byte) (taskInfo, error) {
 		} `xml:"Actions"`
 	}
 	if err := xml.Unmarshal(decodeOutput(data), &task); err != nil {
-		return taskInfo{}, fmt.Errorf("读取自启任务: %w", err)
+		return taskInfo{}, fmt.Errorf(i18n.T().ErrReadStartupTask, err)
 	}
 	level := "normal"
 	if task.Settings.Enabled == "false" {
@@ -181,12 +182,12 @@ func queryTask(name string) (info taskInfo, exists bool, err error) {
 		// query must not silently turn an existing administrator task into "off".
 		all, listErr := schtasks("/Query", "/FO", "CSV", "/NH")
 		if listErr != nil {
-			return taskInfo{}, false, fmt.Errorf("无法查询任务计划程序")
+			return taskInfo{}, false, fmt.Errorf("%s", i18n.T().ErrQueryTaskScheduler)
 		}
 		if !taskListed(all, name) {
 			return taskInfo{}, false, nil
 		}
-		return taskInfo{}, true, fmt.Errorf("无法读取已有自启任务，请以管理员身份运行 MiTray")
+		return taskInfo{}, true, fmt.Errorf("%s", i18n.T().ErrReadStartupAdmin)
 	}
 	info, err = parseTaskXML(output)
 	if err != nil {
@@ -226,7 +227,7 @@ func (s System) SetStartup(level string, delay int) error {
 		return err
 	}
 	if currentExists && !samePath(currentInfo.command, s.Executable) {
-		return fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
+		return fmt.Errorf("%s", i18n.T().ErrTaskNameOccupied)
 	}
 	ownedLegacy, err := s.ownedLegacyTask()
 	if err != nil {
@@ -244,10 +245,10 @@ func (s System) SetStartup(level string, delay int) error {
 		return nil
 	}
 	if level != "admin" && level != "normal" {
-		return fmt.Errorf("无效的自启选项")
+		return fmt.Errorf("%s", i18n.T().ErrInvalidStartupOpt)
 	}
 	if delay < 0 || delay > 600 {
-		return fmt.Errorf("自启延迟应为 0–600 秒")
+		return fmt.Errorf("%s", i18n.T().ErrInvalidStartupDelay)
 	}
 	if ownedLegacy {
 		if err := deleteTask(legacyTaskName(s.Executable)); err != nil {
@@ -280,7 +281,7 @@ func (s System) SetStartup(level string, delay int) error {
 		return closeErr
 	}
 	if _, err := schtasks("/Create", "/TN", s.taskName(), "/XML", f.Name(), "/F"); err != nil {
-		return fmt.Errorf("创建自启任务失败；管理员自启需要以管理员身份运行 MiTray")
+		return fmt.Errorf("%s", i18n.T().ErrCreateStartupAdmin)
 	}
 	return nil
 }
@@ -299,7 +300,7 @@ func (s System) ownedLegacyTask() (bool, error) {
 
 func deleteTask(name string) error {
 	if _, err := schtasks("/Delete", "/TN", name, "/F"); err != nil {
-		return fmt.Errorf("删除自启任务失败，请以管理员身份运行 MiTray: %w", err)
+		return fmt.Errorf(i18n.T().ErrDeleteStartupAdmin, err)
 	}
 	return nil
 }

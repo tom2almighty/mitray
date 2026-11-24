@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"gopkg.in/yaml.v3"
 )
 
@@ -75,7 +76,7 @@ func ReadConnection(data []byte) (Connection, error) {
 		TUN        yaml.Node     `yaml:"tun"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return Connection{}, fmt.Errorf("读取 API 连接信息: %w", err)
+		return Connection{}, fmt.Errorf(i18n.T().ErrReadConnection, err)
 	}
 	port := pickProxyPort(raw.MixedPort, raw.Port, raw.Listeners)
 	hasTUN := raw.TUN.Kind != 0 && raw.TUN.Tag != "!!null"
@@ -98,7 +99,7 @@ func ReadConnection(data []byte) (Connection, error) {
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return Connection{}, fmt.Errorf("external-controller 地址无效")
+		return Connection{}, fmt.Errorf("%s", i18n.T().ErrControllerAddr)
 	}
 	if u.Hostname() == "0.0.0.0" || u.Hostname() == "::" || u.Hostname() == "*" {
 		host := "127.0.0.1"
@@ -110,7 +111,7 @@ func ReadConnection(data []byte) (Connection, error) {
 	if p := u.Port(); p != "" {
 		n, err := strconv.Atoi(p)
 		if err != nil || n < 1 || n > 65535 {
-			return Connection{}, fmt.Errorf("external-controller 端口无效")
+			return Connection{}, fmt.Errorf("%s", i18n.T().ErrControllerPort)
 		}
 	}
 	return Connection{

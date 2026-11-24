@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/tom2almighty/mitray/internal/i18n"
 )
 
 type Status struct {
@@ -21,7 +23,7 @@ type HTTPError struct {
 }
 
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("mihomo API 返回 HTTP %d", e.StatusCode)
+	return fmt.Sprintf(i18n.T().ErrAPIHTTPStatus, e.StatusCode)
 }
 
 type permanentError struct{ err error }
@@ -56,7 +58,7 @@ func (c *Client) Close() { c.HTTP.CloseIdleConnections() }
 
 func (c *Client) request(ctx context.Context, method string, payload []byte) (*http.Response, error) {
 	if c.Connection.Endpoint == "" {
-		return nil, permanent(errors.New("mihomo 配置未设置 external-controller"))
+		return nil, permanent(errors.New(i18n.T().ErrNoController))
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.Connection.Endpoint+"/configs", bytes.NewReader(payload))
 	if err != nil {
@@ -70,12 +72,12 @@ func (c *Client) request(ctx context.Context, method string, payload []byte) (*h
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("无法连接 mihomo API: %w", err)
+		return nil, fmt.Errorf(i18n.T().ErrConnectAPI, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, permanent(errors.New("mihomo API 认证失败，请检查 secret"))
+			return nil, permanent(errors.New(i18n.T().ErrAPIAuth))
 		}
 		if resp.StatusCode == 400 || resp.StatusCode == 404 {
 			return nil, permanent(&HTTPError{StatusCode: resp.StatusCode})
@@ -99,7 +101,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 		Port      int `json:"port"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&raw); err != nil {
-		return Status{}, permanent(fmt.Errorf("读取 mihomo 状态: %w", err))
+		return Status{}, permanent(fmt.Errorf(i18n.T().ErrReadAPIStatus, err))
 	}
 	port := raw.MixedPort
 	if port == 0 {

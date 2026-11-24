@@ -14,37 +14,39 @@ import (
 	"github.com/lxn/win"
 	"github.com/tom2almighty/mitray/internal/config"
 	"github.com/tom2almighty/mitray/internal/controller"
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"github.com/tom2almighty/mitray/internal/platform"
 	"golang.org/x/sys/windows"
 )
 
 // CenterSettingsWindow is shared with the second-instance activation path.
 func CenterSettingsWindow(hwnd win.HWND) error {
+	t := i18n.T()
 	var cursor win.POINT
 	if !win.GetCursorPos(&cursor) {
-		return fmt.Errorf("无法获取鼠标位置，设置窗口未居中")
+		return fmt.Errorf("%s", t.ErrGetCursorPos)
 	}
 	point := win.RECT{Left: cursor.X, Top: cursor.Y, Right: cursor.X + 1, Bottom: cursor.Y + 1}
 	monitor, _, err := windows.NewLazySystemDLL("user32.dll").NewProc("MonitorFromRect").Call(
 		uintptr(unsafe.Pointer(&point)), win.MONITOR_DEFAULTTONEAREST)
 	if monitor == 0 {
-		return fmt.Errorf("无法获取鼠标所在显示器: %w", err)
+		return fmt.Errorf(t.ErrGetMonitor, err)
 	}
 	info := win.MONITORINFO{CbSize: uint32(unsafe.Sizeof(win.MONITORINFO{}))}
 	if !win.GetMonitorInfo(win.HMONITOR(monitor), &info) {
-		return fmt.Errorf("无法获取显示器工作区，设置窗口未居中")
+		return fmt.Errorf("%s", t.ErrGetMonitorWork)
 	}
 	// Moving across monitors can change DPI and resize the window synchronously.
 	for range 2 {
 		var bounds win.RECT
 		if !win.GetWindowRect(hwnd, &bounds) {
-			return fmt.Errorf("无法获取设置窗口尺寸")
+			return fmt.Errorf("%s", t.ErrGetWindowRect)
 		}
 		work := info.RcWork
 		x := work.Left + max(0, (work.Right-work.Left-(bounds.Right-bounds.Left))/2)
 		y := work.Top + max(0, (work.Bottom-work.Top-(bounds.Bottom-bounds.Top))/2)
 		if !win.SetWindowPos(hwnd, 0, x, y, 0, 0, win.SWP_NOSIZE|win.SWP_NOZORDER|win.SWP_NOACTIVATE) {
-			return fmt.Errorf("无法将设置窗口居中")
+			return fmt.Errorf("%s", t.ErrCenterWindow)
 		}
 	}
 	return nil
@@ -98,17 +100,18 @@ func statusBlock(caption string, target **walk.Label, font Font) Widget {
 		StretchFactor: 1,
 		Children: []Widget{
 			Label{Text: caption, TextColor: systemMutedColor()},
-			Label{AssignTo: target, Text: "未知", Font: font, TextColor: systemTextColor()},
+			Label{AssignTo: target, Text: i18n.T().StateUnknown, Font: font, TextColor: systemTextColor()},
 		},
 	}
 }
 
 func (a *app) createWindow() error {
+	t := i18n.T()
 	font := systemMessageFont(false)
 	boldFont := systemMessageFont(true)
 	return (MainWindow{
-		AssignTo: &a.window, Title: "MiTray 设置", Visible: false,
-		MinSize: Size{Width: 680, Height: 680}, Size: Size{Width: 740, Height: 740},
+		AssignTo: &a.window, Title: t.WindowTitle, Visible: false,
+		MinSize: Size{Width: 680, Height: 700}, Size: Size{Width: 740, Height: 760},
 		Font:   font,
 		Layout: VBox{Margins: Margins{Left: 24, Top: 20, Right: 24, Bottom: 20}, Spacing: 14},
 		Children: []Widget{
@@ -116,89 +119,94 @@ func (a *app) createWindow() error {
 				Label{Text: "MiTray", Font: systemTitleFont()},
 				HSpacer{}, Label{Text: "Windows · " + a.version, TextColor: systemMutedColor()},
 			}},
-			GroupBox{Title: "当前状态", Layout: VBox{Spacing: 12}, Children: []Widget{
+			GroupBox{Title: t.GroupStatus, Layout: VBox{Spacing: 12}, Children: []Widget{
 				Composite{Layout: HBox{MarginsZero: true, Spacing: 14}, Children: []Widget{
-					statusBlock("核心", &a.statusLabel, boldFont),
+					statusBlock(t.StatusCore, &a.statusLabel, boldFont),
 					VSeparator{},
 					statusBlock("TUN", &a.tunLabel, boldFont),
 					VSeparator{},
-					statusBlock("系统代理", &a.proxyLabel, boldFont),
+					statusBlock(t.StatusProxy, &a.proxyLabel, boldFont),
 				}},
 				Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-					PushButton{AssignTo: &a.startButton, Text: "启动核心", OnClicked: func() {
+					PushButton{AssignTo: &a.startButton, Text: t.BtnStartCore, OnClicked: func() {
 						if a.controller.Snapshot().Running {
-							a.run("正在重启核心…", a.controller.Restart, false, nil)
+							a.run(i18n.T().BusyRestartCore, a.controller.Restart, false, nil)
 						} else {
-							a.run("正在启动核心…", a.controller.Start, false, nil)
+							a.run(i18n.T().BusyStartCore, a.controller.Start, false, nil)
 						}
 					}},
-					PushButton{AssignTo: &a.tunButton, Text: "切换 TUN", OnClicked: func() { a.run("正在切换 TUN…", a.controller.ToggleTUN, false, nil) }},
-					PushButton{AssignTo: &a.proxyButton, Text: "切换系统代理", OnClicked: func() { a.run("正在切换系统代理…", a.controller.ToggleProxy, false, nil) }},
-					PushButton{AssignTo: &a.openConfigButton, Text: "打开配置文件", OnClicked: a.openActiveConfig},
+					PushButton{AssignTo: &a.tunButton, Text: t.BtnToggleTUN, OnClicked: func() { a.run(i18n.T().BusyToggleTUN, a.controller.ToggleTUN, false, nil) }},
+					PushButton{AssignTo: &a.proxyButton, Text: t.BtnToggleProxy, OnClicked: func() { a.run(i18n.T().BusyToggleProxy, a.controller.ToggleProxy, false, nil) }},
+					PushButton{AssignTo: &a.openConfigButton, Text: t.BtnOpenConfig, OnClicked: a.openActiveConfig},
 					HSpacer{},
 				}},
-				Label{AssignTo: &a.hintLabel, Text: "启动或重启核心时遵循配置文件的 TUN 设置；手动切换仅本次生效。", TextColor: systemMutedColor()},
+				Label{AssignTo: &a.hintLabel, Text: t.HintDefault, TextColor: systemMutedColor()},
 			}},
 			Composite{AssignTo: &a.settingsBody, Layout: VBox{MarginsZero: true, Spacing: 14}, Children: []Widget{
-				GroupBox{Title: "核心与配置", Layout: VBox{Spacing: 10}, Children: []Widget{
-					Label{Text: "mihomo 核心程序"},
+				GroupBox{Title: t.GroupCoreAndProfiles, Layout: VBox{Spacing: 10}, Children: []Widget{
+					Label{Text: t.LabelCoreExe},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						LineEdit{AssignTo: &a.coreEdit, StretchFactor: 1, CueBanner: "选择 mihomo.exe", OnTextChanged: a.markDirty},
-						PushButton{Text: "浏览…", OnClicked: func() { a.browse(a.coreEdit, "选择 mihomo 核心", "可执行文件 (*.exe)|*.exe") }},
+						LineEdit{AssignTo: &a.coreEdit, StretchFactor: 1, CueBanner: t.CueCoreExe, OnTextChanged: a.markDirty},
+						PushButton{Text: t.BtnBrowse, OnClicked: func() { a.browse(a.coreEdit, t.DlgBrowseCoreTitle, t.DlgBrowseCoreFilter) }},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						Label{Text: "配置档案"},
+						Label{Text: t.LabelProfile},
 						ComboBox{AssignTo: &a.profileCombo, StretchFactor: 1, OnCurrentIndexChanged: a.profileChanged},
-						PushButton{AssignTo: &a.activateProfileButton, Text: "设为当前使用", OnClicked: a.activateEditingProfile},
-						PushButton{AssignTo: &a.deleteProfileButton, Text: "删除…", OnClicked: a.deleteProfile},
+						PushButton{AssignTo: &a.activateProfileButton, Text: t.BtnSetActiveProfile, OnClicked: a.activateEditingProfile},
+						PushButton{AssignTo: &a.deleteProfileButton, Text: t.BtnDelete, OnClicked: a.deleteProfile},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						Label{Text: "配置名称"},
+						Label{Text: t.LabelProfileName},
 						LineEdit{AssignTo: &a.profileNameEdit, StretchFactor: 1, OnTextChanged: a.markDirty},
-						Label{Text: "来源"},
-						ComboBox{AssignTo: &a.sourceCombo, Model: []string{"本地文件", "远程 URL"}, CurrentIndex: 0, OnCurrentIndexChanged: a.sourceChanged},
+						Label{Text: t.LabelSource},
+						ComboBox{AssignTo: &a.sourceCombo, Model: []string{t.SourceLocal, t.SourceURL}, CurrentIndex: 0, OnCurrentIndexChanged: a.sourceChanged},
 					}},
 					Composite{AssignTo: &a.localBody, Layout: VBox{MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "本地 YAML 文件"},
+						Label{Text: t.LabelLocalYAML},
 						Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-							LineEdit{AssignTo: &a.localEdit, StretchFactor: 1, CueBanner: "选择 mihomo YAML 配置", OnTextChanged: a.markDirty},
-							PushButton{Text: "浏览…", OnClicked: func() {
-								a.browse(a.localEdit, "选择 mihomo 配置", "YAML 配置 (*.yaml;*.yml)|*.yaml;*.yml|所有文件 (*.*)|*.*")
+							LineEdit{AssignTo: &a.localEdit, StretchFactor: 1, CueBanner: t.CueLocalYAML, OnTextChanged: a.markDirty},
+							PushButton{Text: t.BtnBrowse, OnClicked: func() {
+								a.browse(a.localEdit, t.DlgBrowseConfigTitle, t.DlgBrowseConfigFilter)
 							}},
 						}},
 					}},
 					Composite{AssignTo: &a.remoteBody, Layout: VBox{MarginsZero: true, Spacing: 6}, Children: []Widget{
-						Label{Text: "远程 URL"},
+						Label{Text: t.LabelRemoteURL},
 						LineEdit{AssignTo: &a.urlEdit, CueBanner: "https://example.com/config.yaml", OnTextChanged: a.markDirty},
-						Label{Text: "远程配置始终直连下载；下载或内容校验失败时使用上次成功缓存。", TextColor: systemMutedColor()},
+						Label{Text: t.HintRemoteDownload, TextColor: systemMutedColor()},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						PushButton{Text: "添加本地配置…", OnClicked: a.addLocalProfile},
-						PushButton{Text: "添加远程配置…", OnClicked: a.addRemoteProfile},
+						PushButton{Text: t.BtnAddLocalProfile, OnClicked: a.addLocalProfile},
+						PushButton{Text: t.BtnAddRemoteProfile, OnClicked: a.addRemoteProfile},
 						HSpacer{},
 					}},
 				}},
-				GroupBox{Title: "启动", Layout: VBox{Spacing: 10}, Children: []Widget{
-					CheckBox{AssignTo: &a.autoStart, Text: "打开 MiTray 时自动启动 mihomo", OnCheckedChanged: a.markDirty},
+				GroupBox{Title: t.GroupStartup, Layout: VBox{Spacing: 10}, Children: []Widget{
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						Label{Text: "开机自启"},
-						ComboBox{AssignTo: &a.startupCombo, Model: []string{"关闭", "普通权限", "管理员权限"}, CurrentIndex: 0, OnCurrentIndexChanged: a.markDirty},
-						HSpacer{}, Label{Text: "登录后延迟"},
-						NumberEdit{AssignTo: &a.delay, Decimals: 0, MinValue: 0, MaxValue: 600, Value: 15, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, OnValueChanged: a.markDirty},
-						Label{Text: "秒"},
+						CheckBox{AssignTo: &a.autoStart, Text: t.CheckAutoStartCore, OnCheckedChanged: a.markDirty},
+						HSpacer{},
+						Label{Text: t.LabelLanguage},
+						ComboBox{AssignTo: &a.languageCombo, Model: []string{t.LangAuto, t.LangZH, t.LangEN}, CurrentIndex: 0, OnCurrentIndexChanged: a.markDirty},
 					}},
 					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-						Label{Text: "TUN 需要 mihomo 以管理员权限运行。", TextColor: systemMutedColor()},
-						HSpacer{}, PushButton{Text: "以管理员身份重启", Visible: !platform.IsAdmin(), OnClicked: a.elevate},
+						Label{Text: t.LabelAutostart},
+						ComboBox{AssignTo: &a.startupCombo, Model: []string{t.StartupOff, t.StartupNormal, t.StartupAdmin}, CurrentIndex: 0, OnCurrentIndexChanged: a.markDirty},
+						HSpacer{}, Label{Text: t.LabelLogonDelay},
+						NumberEdit{AssignTo: &a.delay, Decimals: 0, MinValue: 0, MaxValue: 600, Value: 15, MinSize: Size{Width: 70}, MaxSize: Size{Width: 85}, OnValueChanged: a.markDirty},
+						Label{Text: t.LabelSeconds},
+					}},
+					Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
+						Label{Text: t.HintTUNRequiresAdmin, TextColor: systemMutedColor()},
+						HSpacer{}, PushButton{Text: t.BtnRestartAdmin, Visible: !platform.IsAdmin(), OnClicked: a.elevate},
 					}},
 				}},
 			}},
 			VSpacer{},
-			TextLabel{AssignTo: &a.feedback, MinSize: Size{Width: 600, Height: 42}, Text: "修改核心或配置档案后，保存会重新启动正在运行的核心。", TextColor: systemAccentColor()},
+			TextLabel{AssignTo: &a.feedback, MinSize: Size{Width: 600, Height: 42}, Text: t.FeedbackDefault, TextColor: systemAccentColor()},
 			Composite{Layout: HBox{MarginsZero: true}, Children: []Widget{
-				Label{Text: "关闭窗口后继续在托盘运行，未保存的修改会保留。", TextColor: systemMutedColor()}, HSpacer{},
-				PushButton{Text: "收起", OnClicked: func() { a.window.Hide() }},
-				PushButton{AssignTo: &a.saveButton, Text: "保存并应用", MinSize: Size{Width: 110, Height: 32}, OnClicked: a.saveSettings},
+				Label{Text: t.HintCloseToTray, TextColor: systemMutedColor()}, HSpacer{},
+				PushButton{Text: t.BtnHide, OnClicked: func() { a.window.Hide() }},
+				PushButton{AssignTo: &a.saveButton, Text: t.BtnSaveAndApply, MinSize: Size{Width: 110, Height: 32}, OnClicked: a.saveSettings},
 			}},
 		},
 	}).Create()
@@ -219,6 +227,14 @@ func (a *app) fillSettings() {
 	a.draftActiveProfile = s.ActiveProfile
 	a.coreEdit.SetText(s.CorePath)
 	a.autoStart.SetChecked(s.AutoStartCore)
+	langIdx := 0
+	switch s.Language {
+	case i18n.ZH:
+		langIdx = 1
+	case i18n.EN:
+		langIdx = 2
+	}
+	a.languageCombo.SetCurrentIndex(langIdx)
 	a.fillStartup()
 	a.refreshProfileModel(s.ActiveProfile)
 	if profile, ok := a.draftProfiles[s.ActiveProfile]; ok {
@@ -258,7 +274,7 @@ func (a *app) markDirty() {
 		return
 	}
 	if !a.dirty {
-		a.feedback.SetText("有未保存的修改。")
+		a.feedback.SetText(i18n.T().FeedbackUnsaved)
 	}
 	a.dirty = true
 }
@@ -281,6 +297,7 @@ func (a *app) updateProfileControls() {
 	if a.profileNameEdit == nil {
 		return
 	}
+	t := i18n.T()
 	hasProfile := a.editingProfile != ""
 	a.profileNameEdit.SetEnabled(hasProfile)
 	a.sourceCombo.SetEnabled(hasProfile)
@@ -289,10 +306,10 @@ func (a *app) updateProfileControls() {
 	a.deleteProfileButton.SetEnabled(hasProfile && !a.busy)
 	if a.activateProfileButton != nil {
 		if hasProfile && a.editingProfile == a.draftActiveProfile {
-			a.activateProfileButton.SetText("当前使用中")
+			a.activateProfileButton.SetText(t.BtnActiveProfile)
 			a.activateProfileButton.SetEnabled(false)
 		} else {
-			a.activateProfileButton.SetText("设为当前使用")
+			a.activateProfileButton.SetText(t.BtnSetActiveProfile)
 			a.activateProfileButton.SetEnabled(hasProfile && !a.busy)
 		}
 	}
@@ -312,7 +329,7 @@ func (a *app) activateEditingProfile() {
 	a.draftActiveProfile = a.editingProfile
 	a.updateProfileControls()
 	a.markDirty()
-	a.feedback.SetText("已设为当前使用配置，点击「保存并应用」后生效。")
+	a.feedback.SetText(i18n.T().FeedbackActivePending)
 }
 
 func (a *app) refreshProfileModel(selected string) {
@@ -367,7 +384,7 @@ func (a *app) commitCurrentProfile() error {
 	}
 	if name != a.editingProfile {
 		if _, exists := a.draftProfiles[name]; exists {
-			return fmt.Errorf("配置名称 %q 已存在", name)
+			return fmt.Errorf(i18n.T().ErrProfileNameExists, name)
 		}
 		delete(a.draftProfiles, a.editingProfile)
 		if a.draftActiveProfile == a.editingProfile {
@@ -427,7 +444,8 @@ func (a *app) addLocalProfile() {
 		a.feedback.SetText(err.Error())
 		return
 	}
-	dlg := walk.FileDialog{Title: "添加 mihomo 配置", Filter: "YAML 配置 (*.yaml;*.yml)|*.yaml;*.yml|所有文件 (*.*)|*.*"}
+	t := i18n.T()
+	dlg := walk.FileDialog{Title: t.DlgAddConfigTitle, Filter: t.DlgBrowseConfigFilter}
 	ok, err := dlg.ShowOpen(a.window)
 	if err != nil {
 		a.feedback.SetText(err.Error())
@@ -446,9 +464,9 @@ func (a *app) addLocalProfile() {
 	a.loadProfile(name, profile)
 	a.markDirty()
 	if a.draftActiveProfile == name {
-		a.feedback.SetText("已添加本地配置，点击「保存并应用」后生效。")
+		a.feedback.SetText(t.FeedbackLocalAdded)
 	} else {
-		a.feedback.SetText("已添加本地配置；如需切换为当前配置，请点击「设为当前使用」，然后保存。")
+		a.feedback.SetText(t.FeedbackLocalAddedAlt)
 	}
 }
 
@@ -468,7 +486,7 @@ func (a *app) addRemoteProfile() {
 	}
 	a.loadProfile(name, profile)
 	a.markDirty()
-	a.feedback.SetText("已添加远程配置，请填写 URL 后保存。")
+	a.feedback.SetText(i18n.T().FeedbackRemoteAdded)
 }
 
 func (a *app) deleteProfile() {
@@ -479,12 +497,13 @@ func (a *app) deleteProfile() {
 		a.feedback.SetText(err.Error())
 		return
 	}
+	t := i18n.T()
 	if len(a.draftProfiles) <= 1 {
-		a.feedback.SetText("至少保留一个配置档案。")
+		a.feedback.SetText(t.FeedbackKeepOne)
 		return
 	}
 	name := a.editingProfile
-	if walk.MsgBox(a.window, "删除配置档案", fmt.Sprintf("删除配置档案 %q？", name),
+	if walk.MsgBox(a.window, t.DlgDeleteProfileTitle, fmt.Sprintf(t.DlgDeleteProfilePrompt, name),
 		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
 		return
 	}
@@ -507,7 +526,7 @@ func (a *app) browse(edit *walk.LineEdit, title, filter string) {
 		return
 	}
 	if edit != a.coreEdit && a.editingProfile == "" {
-		a.feedback.SetText("请先添加一个配置档案。")
+		a.feedback.SetText(i18n.T().FeedbackAddProfile)
 		return
 	}
 	dlg := walk.FileDialog{Title: title, Filter: filter, FilePath: edit.Text()}
@@ -529,14 +548,22 @@ func (a *app) saveSettings() {
 		a.feedback.SetText(err.Error())
 		return
 	}
+	t := i18n.T()
 	if a.editingProfile == "" {
-		a.feedback.SetText("请先添加一个配置档案。")
+		a.feedback.SetText(t.FeedbackAddProfile)
 		return
 	}
 	snap := a.controller.Snapshot()
 	s := snap.Settings
 	s.CorePath = strings.TrimSpace(a.coreEdit.Text())
 	s.AutoStartCore = a.autoStart.Checked()
+	langs := []string{i18n.Auto, i18n.ZH, i18n.EN}
+	langIdx := a.languageCombo.CurrentIndex()
+	if langIdx < 0 || langIdx >= len(langs) {
+		langIdx = 0
+	}
+	s.Language = langs[langIdx]
+	langChanged := i18n.Resolve(s.Language) != i18n.Code()
 	var startup *controller.StartupSpec
 	if snap.StartupLevel != "" {
 		levels := []string{"off", "normal", "admin"}
@@ -556,7 +583,7 @@ func (a *app) saveSettings() {
 	}
 	for name, profile := range s.Profiles {
 		if err := profile.Validate(a.base); err != nil {
-			a.feedback.SetText(fmt.Sprintf("配置档案 %q 无效: %v", name, err))
+			a.feedback.SetText(fmt.Sprintf(t.ErrProfileInvalid, name, err))
 			return
 		}
 	}
@@ -564,10 +591,14 @@ func (a *app) saveSettings() {
 		a.feedback.SetText(err.Error())
 		return
 	}
-	a.run("正在保存并应用…", func(ctx context.Context) error { return a.controller.SaveSettingsWithStartup(ctx, s, startup) }, false, func(err error) {
+	a.run(t.BusySaveSettings, func(ctx context.Context) error { return a.controller.SaveSettingsWithStartup(ctx, s, startup) }, false, func(err error) {
 		if err == nil {
 			a.fillSettings()
-			a.feedback.SetText("设置已保存。关闭此窗口后，MiTray 会继续在托盘运行。")
+			if langChanged {
+				a.feedback.SetText(t.FeedbackSavedLang)
+			} else {
+				a.feedback.SetText(t.FeedbackSaved)
+			}
 		}
 	})
 }

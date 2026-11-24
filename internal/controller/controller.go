@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tom2almighty/mitray/internal/config"
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"github.com/tom2almighty/mitray/internal/mihomo"
 )
 
@@ -177,7 +178,7 @@ func (c *Controller) boot(ctx context.Context, restart bool) error {
 		c.startupLevel, c.startupDelay = level, delay
 	} else {
 		c.startupLevel = ""
-		c.notice = "无法读取开机自启设置: " + err.Error()
+		c.notice = fmt.Sprintf(i18n.T().NoticeReadStartupFailed, err.Error())
 	}
 	c.readProxy()
 	if err := c.cfg.Validate(c.base); err != nil {
@@ -242,7 +243,7 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 		}
 		pid, err = c.core.Start(exe, src.path, filepath.Dir(exe))
 		if err != nil {
-			return fmt.Errorf("启动 mihomo: %w", err)
+			return fmt.Errorf(i18n.T().ErrStartMihomo, err)
 		}
 		c.ownedPID = pid
 	}
@@ -252,11 +253,11 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 		return err
 	}
 	if newProcess && c.configTUNEnabled && !c.system.IsAdmin() && (c.tun == nil || !*c.tun) {
-		hint := "当前配置文件启用了 TUN，但 MiTray 未以管理员身份运行，请以管理员身份重新启动。"
+		hint := i18n.T().NoticeTUNNeedsAdmin
 		if c.notice == "" {
 			c.notice = hint
 		} else {
-			c.notice += "；" + hint
+			c.notice += " " + hint
 		}
 	}
 	return nil
@@ -265,7 +266,7 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 func (c *Controller) checkCore() error {
 	if !c.core.Alive(c.pid, c.activeExe) {
 		c.pid, c.ownedPID, c.tun = 0, 0, nil
-		return errors.New("核心进程已退出或变化，已取消当前操作")
+		return errors.New(i18n.T().ErrCoreExited)
 	}
 	return nil
 }
@@ -282,7 +283,7 @@ func (c *Controller) setClient(conn mihomo.Connection) {
 
 func (c *Controller) waitReady(ctx context.Context) error {
 	if c.client.Connection.Endpoint == "" {
-		return errors.New("核心已启动，但配置缺少 external-controller，无法控制 TUN")
+		return errors.New(i18n.T().ErrNoControllerForTUN)
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.readyTimeout)
 	defer cancel()
@@ -301,7 +302,7 @@ func (c *Controller) waitReady(ctx context.Context) error {
 		}
 		last = err
 		if err := pause(ctx, c.retryInterval); err != nil {
-			return fmt.Errorf("等待核心 API 就绪超时，可重启核心重试: %w", last)
+			return fmt.Errorf(i18n.T().ErrWaitAPIReadyTimeout, last)
 		}
 	}
 }
@@ -336,7 +337,7 @@ func (c *Controller) stop() error {
 	}
 	if c.pid != 0 {
 		if err := c.core.Stop(c.pid, c.activeExe); err != nil {
-			return fmt.Errorf("停止 mihomo: %w", err)
+			return fmt.Errorf(i18n.T().ErrStopMihomo, err)
 		}
 	}
 	c.pid, c.ownedPID, c.tun = 0, 0, nil
@@ -434,10 +435,10 @@ func (c *Controller) ToggleTUN(ctx context.Context) error {
 	defer c.op.Unlock()
 	defer c.publish()
 	if c.pid == 0 || !c.core.Alive(c.pid, c.activeExe) {
-		return errors.New("请先启动 mihomo 核心")
+		return errors.New(i18n.T().ErrStartCoreFirst)
 	}
 	if c.client == nil {
-		return errors.New("尚未连接核心，请稍候或重启核心")
+		return errors.New(i18n.T().ErrCoreNotConnected)
 	}
 	s, err := c.client.Status(ctx)
 	if err != nil {
@@ -446,7 +447,7 @@ func (c *Controller) ToggleTUN(ctx context.Context) error {
 	}
 	c.acceptStatus(s)
 	if s.TUN == nil {
-		return errors.New("mihomo 未返回 TUN 状态，请在 WebUI 查看日志")
+		return errors.New(i18n.T().ErrNoTUNStatus)
 	}
 	return c.applyTUN(ctx, !*s.TUN)
 }
@@ -459,7 +460,7 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 		return nil
 	}
 	if target && c.ownedPID != 0 && c.ownedPID == c.pid && !c.system.IsAdmin() {
-		return errors.New("当前 MiTray 未以管理员身份运行，无法启用 TUN；请使用「以管理员身份重新启动」")
+		return errors.New(i18n.T().ErrEnableTUNNeedsAdmin)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
@@ -504,12 +505,12 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 		}
 	}
 	if last != nil {
-		return fmt.Errorf("TUN 切换未确认: %w", last)
+		return fmt.Errorf(i18n.T().ErrTUNNotConfirmed, last)
 	}
 	if target && !c.hasTUNConfig {
-		return errors.New("TUN 未达到目标状态；当前配置文件未包含 tun 段落，请检查 YAML 中的 tun/dns 配置并确认 mihomo 具有管理员权限")
+		return errors.New(i18n.T().ErrTUNMissingSection)
 	}
-	return errors.New("TUN 未达到目标状态；请在 WebUI 查看日志，并确认 mihomo 具有管理员权限")
+	return errors.New(i18n.T().ErrTUNNotReached)
 }
 
 func (c *Controller) ToggleProxy(ctx context.Context) error {
@@ -524,11 +525,11 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 		if c.pid == 0 || !c.core.Alive(c.pid, c.activeExe) {
 			c.pid, c.tun = 0, nil
 			c.readProxy()
-			return errors.New("请先启动 mihomo 核心")
+			return errors.New(i18n.T().ErrStartCoreFirst)
 		}
 		if c.client == nil {
 			c.readProxy()
-			return errors.New("尚未连接核心，请稍候或重启核心")
+			return errors.New(i18n.T().ErrCoreNotConnected)
 		}
 		s, err := c.client.Status(ctx)
 		if err != nil {
@@ -538,7 +539,7 @@ func (c *Controller) ToggleProxy(ctx context.Context) error {
 		}
 		c.acceptStatus(s)
 		if c.proxyPort < 1 || c.proxyPort > 65535 {
-			return errors.New("mihomo 没有可用的 mixed-port 或 port")
+			return errors.New(i18n.T().ErrNoProxyPort)
 		}
 	}
 	if err := c.system.SetProxy(!enabled, c.proxyPort); err != nil {
@@ -560,14 +561,14 @@ func (c *Controller) ProxyPort(ctx context.Context) (int, error) {
 		return c.proxyPort, nil
 	}
 	if _, ok := c.cfg.ActiveProfileConfig(); !ok {
-		return 0, errors.New("请先在设置中选择 mihomo 配置文件")
+		return 0, errors.New(i18n.T().ErrSelectMihomoConfig)
 	}
 	src, err := prepareSource(ctx, c.base, c.cfg, true)
 	if err != nil {
 		return 0, err
 	}
 	if src.connection.ProxyPort == 0 {
-		return 0, errors.New("mihomo 没有可用的 mixed-port 或 port")
+		return 0, errors.New(i18n.T().ErrNoProxyPort)
 	}
 	return src.connection.ProxyPort, nil
 }
@@ -578,36 +579,36 @@ func (c *Controller) ActiveConfigPath() (string, error) {
 	s := c.Snapshot().Settings
 	profile, ok := s.ActiveProfileConfig()
 	if !ok {
-		return "", errors.New("请先在设置中选择 mihomo 配置文件")
+		return "", errors.New(i18n.T().ErrSelectMihomoConfig)
 	}
 	switch profile.Type {
 	case config.ProfileLocal:
 		path := profile.Resolve(c.base)
 		if path == "" {
-			return "", errors.New("请先在设置中选择本地 mihomo 配置文件")
+			return "", errors.New(i18n.T().ErrSelectLocalConfig)
 		}
 		info, err := os.Stat(path)
 		if err != nil {
-			return "", fmt.Errorf("无法找到配置文件: %w", err)
+			return "", fmt.Errorf(i18n.T().ErrConfigFileNotFound, err)
 		}
 		if info.IsDir() {
-			return "", errors.New("当前配置路径是文件夹")
+			return "", errors.New(i18n.T().ErrConfigPathIsDir)
 		}
 		return path, nil
 	case config.ProfileURL:
 		if strings.TrimSpace(profile.URL) == "" {
-			return "", errors.New("请先填写远程配置 URL")
+			return "", errors.New(i18n.T().ErrEnterRemoteURL)
 		}
 		path := filepath.Join(c.base, "cache", remoteCacheName(profile.URL))
 		if _, err := os.Stat(path); err != nil {
 			if os.IsNotExist(err) {
-				return "", errors.New("远程配置尚未缓存，请先启动或重启核心下载")
+				return "", errors.New(i18n.T().ErrRemoteNotCached)
 			}
-			return "", fmt.Errorf("无法读取远程配置缓存: %w", err)
+			return "", fmt.Errorf(i18n.T().ErrReadCacheFile, err)
 		}
 		return path, nil
 	default:
-		return "", errors.New("配置来源类型无效")
+		return "", errors.New(i18n.T().ErrInvalidSourceType)
 	}
 }
 
@@ -615,10 +616,10 @@ func validateStartup(spec StartupSpec) error {
 	switch spec.Level {
 	case "off", "normal", "admin":
 	default:
-		return errors.New("无效的开机自启选项")
+		return errors.New(i18n.T().ErrInvalidStartupOpt)
 	}
 	if spec.Delay < 0 || spec.Delay > 600 {
-		return errors.New("自启延迟应为 0–600 秒")
+		return errors.New(i18n.T().ErrInvalidStartupDelay)
 	}
 	return nil
 }
@@ -652,16 +653,16 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings, sta
 	taskChanged := startup != nil && (startup.Level != oldLevel || (startup.Level != "off" && startup.Delay != oldDelay))
 	if taskChanged {
 		if err := c.system.SetStartup(startup.Level, startup.Delay); err != nil {
-			return fmt.Errorf("开机自启未更新，设置尚未保存: %w", err)
+			return fmt.Errorf(i18n.T().ErrStartupNotUpdated, err)
 		}
 	}
 	if err := c.store.Save(next); err != nil {
 		if taskChanged && oldLevel != "" {
 			if undoErr := c.system.SetStartup(oldLevel, oldDelay); undoErr != nil {
-				return fmt.Errorf("保存失败: %v；恢复原自启设置也失败: %v", err, undoErr)
+				return fmt.Errorf(i18n.T().ErrSaveAndUndoFailed, err, undoErr)
 			}
 		}
-		return fmt.Errorf("保存设置失败: %w", err)
+		return fmt.Errorf(i18n.T().ErrSaveSettings, err)
 	}
 	c.cfg = next
 	if taskChanged {
@@ -674,7 +675,7 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings, sta
 		if c.pid != 0 {
 			if err := c.restart(ctx); err != nil {
 				pruneRemoteCache(c.base, next.Profiles)
-				return fmt.Errorf("设置已保存，但应用失败: %w", err)
+				return fmt.Errorf(i18n.T().ErrSavedApplyFailed, err)
 			}
 			pruneRemoteCache(c.base, next.Profiles)
 			return nil
@@ -682,7 +683,7 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings, sta
 		if next.AutoStartCore {
 			if err := c.start(ctx, nil); err != nil {
 				pruneRemoteCache(c.base, next.Profiles)
-				return fmt.Errorf("设置已保存，但启动失败: %w", err)
+				return fmt.Errorf(i18n.T().ErrSavedStartFailed, err)
 			}
 		}
 	}
@@ -696,7 +697,7 @@ func (c *Controller) SelectProfile(ctx context.Context, name string) error {
 	defer c.publish()
 	_, ok := c.cfg.Profiles[name]
 	if !ok {
-		return errors.New("配置不存在")
+		return errors.New(i18n.T().ErrProfileNotFound)
 	}
 	next := c.cfg.Clone()
 	next.ActiveProfile = name

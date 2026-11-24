@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tom2almighty/mitray/internal/config"
+	"github.com/tom2almighty/mitray/internal/i18n"
 	"github.com/tom2almighty/mitray/internal/mihomo"
 	"github.com/tom2almighty/mitray/internal/storage"
 )
@@ -27,7 +28,7 @@ type source struct {
 func prepareSource(ctx context.Context, base string, cfg config.Settings, cachedOnly bool) (source, error) {
 	profile, ok := cfg.ActiveProfileConfig()
 	if !ok {
-		return source{}, fmt.Errorf("请选择有效的 mihomo 配置文件")
+		return source{}, fmt.Errorf("%s", i18n.T().ErrSelectMihomoConfig)
 	}
 	return prepareProfileSource(ctx, base, profile, cachedOnly)
 }
@@ -41,17 +42,17 @@ func prepareProfileSource(ctx context.Context, base string, profile config.Profi
 		path := profile.Resolve(base)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return source{}, fmt.Errorf("读取 mihomo 配置: %w", err)
+			return source{}, fmt.Errorf(i18n.T().ErrReadMihomoConfig, err)
 		}
 		conn, err := mihomo.ReadConnection(data)
 		if err != nil {
-			return source{}, fmt.Errorf("本地 mihomo 配置无效: %w", err)
+			return source{}, fmt.Errorf(i18n.T().ErrInvalidLocalConfig, err)
 		}
 		return source{path: path, connection: conn}, nil
 	case config.ProfileURL:
 		return prepareRemoteSource(ctx, base, profile, cachedOnly)
 	default:
-		return source{}, fmt.Errorf("配置来源类型无效")
+		return source{}, fmt.Errorf("%s", i18n.T().ErrInvalidSourceType)
 	}
 }
 
@@ -118,16 +119,16 @@ func prepareRemoteSource(ctx context.Context, base string, profile config.Profil
 		data, freshErr = download(ctx, profile.URL, ua)
 		if freshErr == nil {
 			if _, parseErr := mihomo.ReadConnection(data); parseErr != nil {
-				data, freshErr = nil, fmt.Errorf("远程配置内容无效: %w", parseErr)
+				data, freshErr = nil, fmt.Errorf(i18n.T().ErrRemoteContentBad, parseErr)
 			}
 		}
 		if freshErr == nil {
 			if writeErr := storage.WriteFile(path, data); writeErr != nil {
-				data, freshErr = nil, fmt.Errorf("远程配置缓存写入失败: %w", writeErr)
+				data, freshErr = nil, fmt.Errorf(i18n.T().ErrRemoteCacheWrite, writeErr)
 			}
 		}
 		if freshErr != nil {
-			warning = "远程配置未更新: " + freshErr.Error()
+			warning = fmt.Sprintf(i18n.T().ErrRemoteNotUpdated, freshErr.Error())
 		}
 	}
 
@@ -135,19 +136,19 @@ func prepareRemoteSource(ctx context.Context, base string, profile config.Profil
 		cached, cacheErr := os.ReadFile(path)
 		if cacheErr == nil {
 			if _, parseErr := mihomo.ReadConnection(cached); parseErr != nil {
-				cacheErr = fmt.Errorf("缓存配置无效: %w", parseErr)
+				cacheErr = fmt.Errorf(i18n.T().ErrCachedConfigBad, parseErr)
 			} else {
 				data = cached
 				if warning != "" {
-					warning += "；已使用 " + cacheDescription(path)
+					warning += fmt.Sprintf(i18n.T().NoticeUsedCache, cacheDescription(path))
 				}
 			}
 		}
 		if cacheErr != nil {
 			if freshErr != nil {
-				return source{}, fmt.Errorf("无法取得远程配置，且没有可用缓存: %v；读取缓存: %w", freshErr, cacheErr)
+				return source{}, fmt.Errorf(i18n.T().ErrNoRemoteOrCache, freshErr, cacheErr)
 			}
-			return source{}, fmt.Errorf("读取远程配置缓存: %w", cacheErr)
+			return source{}, fmt.Errorf(i18n.T().ErrReadRemoteCache, cacheErr)
 		}
 	}
 
@@ -156,7 +157,7 @@ func prepareRemoteSource(ctx context.Context, base string, profile config.Profil
 	}
 	conn, err := mihomo.ReadConnection(data)
 	if err != nil {
-		return source{}, fmt.Errorf("远程配置无效: %w", err)
+		return source{}, fmt.Errorf(i18n.T().ErrInvalidRemoteConfig, err)
 	}
 	return source{path: path, connection: conn, warning: warning}, nil
 }
@@ -164,9 +165,9 @@ func prepareRemoteSource(ctx context.Context, base string, profile config.Profil
 func cacheDescription(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
-		return "上次成功下载的缓存"
+		return i18n.T().CacheLastSuccess
 	}
-	return "缓存（更新于 " + info.ModTime().Format("2006-01-02 15:04") + "）"
+	return fmt.Sprintf(i18n.T().CacheUpdatedAt, info.ModTime().Format("2006-01-02 15:04"))
 }
 
 func download(ctx context.Context, address, userAgent string) ([]byte, error) {
@@ -178,26 +179,26 @@ func download(ctx context.Context, address, userAgent string) ([]byte, error) {
 	defer client.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
-		return nil, fmt.Errorf("远程配置地址无效")
+		return nil, fmt.Errorf("%s", i18n.T().ErrRemoteAddrInvalid)
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("下载远程配置失败: %w", err)
+		return nil, fmt.Errorf(i18n.T().ErrDownloadRemote, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("下载远程配置: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf(i18n.T().ErrDownloadRemoteHTTP, resp.StatusCode)
 	}
 	const maxSize = 16 << 20
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("远程配置下载中断: %w", err)
+		return nil, fmt.Errorf(i18n.T().ErrDownloadInterrupted, err)
 	}
 	if len(b) > maxSize {
-		return nil, fmt.Errorf("远程配置超过 16 MiB")
+		return nil, fmt.Errorf("%s", i18n.T().ErrRemoteTooLarge)
 	}
 	return b, nil
 }

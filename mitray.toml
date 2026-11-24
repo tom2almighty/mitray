@@ -2,6 +2,7 @@
 path = ''
 active_profile = "default"
 auto_start = true
+language = "auto"
 
 [profiles.default]
 type = "local"

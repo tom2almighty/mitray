@@ -13,10 +13,11 @@ func TestTOMLRoundTrip(t *testing.T) {
 	store := Store{Path: filepath.Join(base, Filename)}
 	settings := Default()
 	settings.CorePath = `D:\程序\mihomo.exe`
-	settings.ActiveProfile = "work.prod 北京"
+	settings.ActiveProfile = "work.prod 测试"
 	settings.AutoStartCore = false
+	settings.Language = "en"
 	settings.Profiles = map[string]Profile{
-		"work.prod 北京": {Type: ProfileLocal, Path: `D:\配置\工作.yaml`},
+		"work.prod 测试": {Type: ProfileLocal, Path: `D:\配置\工作.yaml`},
 		"remote":       {Type: ProfileURL, URL: "https://example.com/config?token=abc&mode=rule#part"},
 		"spare":        {Type: ProfileLocal, Path: "configs/spare.yaml"},
 	}
@@ -31,9 +32,10 @@ func TestTOMLRoundTrip(t *testing.T) {
 	text := string(data)
 	for _, want := range []string{
 		"[core]",
-		`active_profile = "work.prod 北京"`,
+		`active_profile = "work.prod 测试"`,
 		"auto_start = false",
-		`[profiles."work.prod 北京"]`,
+		`language = "en"`,
+		`[profiles."work.prod 测试"]`,
 		`type = "url"`,
 	} {
 		if !strings.Contains(text, want) {
