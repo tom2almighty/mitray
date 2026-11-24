@@ -11,7 +11,6 @@ import (
 func TestTOMLRoundTrip(t *testing.T) {
 	base := t.TempDir()
 	store := Store{Path: filepath.Join(base, Filename)}
-	enabled := false
 	settings := Default()
 	settings.CorePath = `D:\程序\mihomo.exe`
 	settings.ActiveProfile = "work.prod 北京"
@@ -23,7 +22,6 @@ func TestTOMLRoundTrip(t *testing.T) {
 	settings.AutoStartCore = false
 	settings.StartupLevel = "admin"
 	settings.StartupDelay = 42
-	settings.TUNEnabled = &enabled
 
 	if err := store.Save(settings); err != nil {
 		t.Fatal(err)
@@ -38,12 +36,14 @@ func TestTOMLRoundTrip(t *testing.T) {
 		`active_profile = "work.prod 北京"`,
 		`[profiles."work.prod 北京"]`,
 		`type = "url"`,
-		"tun_enabled = false",
 		"delay_seconds = 42",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("saved TOML is missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "tun_enabled") || strings.Contains(text, "[state]") {
+		t.Fatalf("saved TOML should not contain legacy TUN state:\n%s", text)
 	}
 
 	round, err := store.Load()
@@ -55,36 +55,35 @@ func TestTOMLRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTOMLTUNOverridePresence(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		value *bool
-		key   bool
-	}{
-		{"follow YAML", nil, false},
-		{"disabled", boolPtr(false), true},
-		{"enabled", boolPtr(true), true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := Store{Path: filepath.Join(t.TempDir(), Filename)}
-			settings := Default()
-			settings.TUNEnabled = tc.value
-			if err := store.Save(settings); err != nil {
-				t.Fatal(err)
-			}
-			data, err := os.ReadFile(store.Path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := strings.Contains(string(data), "tun_enabled"); got != tc.key {
-				t.Fatalf("tun_enabled presence = %t, want %t:\n%s", got, tc.key, data)
-			}
-			round, err := store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertBool(t, round.TUNEnabled, tc.value)
-		})
+func TestTOMLIgnoresLegacyTUNState(t *testing.T) {
+	store := Store{Path: filepath.Join(t.TempDir(), Filename)}
+	content := `[core]
+path = ''
+active_profile = "default"
+
+[profiles.default]
+type = "local"
+path = ''
+
+[state]
+tun_enabled = true
+`
+	if err := os.WriteFile(store.Path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := store.Load()
+	if err != nil {
+		t.Fatalf("legacy state section should be ignored, got error: %v", err)
+	}
+	if err := store.Save(settings); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "tun_enabled") || strings.Contains(string(data), "[state]") {
+		t.Fatalf("resaved TOML should omit legacy state:\n%s", data)
 	}
 }
 
@@ -114,7 +113,7 @@ func TestTOMLLoadDefaultsWhenFileIsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.ActiveProfile != "default" || !settings.AutoStartCore || settings.StartupDelay != 15 || settings.TUNEnabled != nil {
+	if settings.ActiveProfile != "default" || !settings.AutoStartCore || settings.StartupDelay != 15 {
 		t.Fatalf("unexpected defaults: %+v", settings)
 	}
 }
@@ -127,20 +126,5 @@ func TestShippedTOMLParses(t *testing.T) {
 	}
 	if settings.ActiveProfile != "default" || settings.Profiles["default"].Type != ProfileLocal {
 		t.Fatalf("unexpected shipped settings: %+v", settings)
-	}
-}
-
-func boolPtr(b bool) *bool { return &b }
-
-func assertBool(t *testing.T, got, want *bool) {
-	t.Helper()
-	if got == nil || want == nil {
-		if got != want {
-			t.Fatalf("got %v, want %v", got, want)
-		}
-		return
-	}
-	if *got != *want {
-		t.Fatalf("got %v, want %v", *got, *want)
 	}
 }

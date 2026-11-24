@@ -12,11 +12,12 @@ import (
 
 // Only connection information is read. All TUN parameters belong to mihomo.
 type Connection struct {
-	Endpoint  string
-	Secret    string
-	ProxyPort int
-	HasTUN    bool
-	GlobalUA  string
+	Endpoint   string
+	Secret     string
+	ProxyPort  int
+	HasTUN     bool
+	TUNEnabled bool
+	GlobalUA   string
 }
 
 type rawListener struct {
@@ -71,16 +72,25 @@ func ReadConnection(data []byte) (Connection, error) {
 		Port       int           `yaml:"port"`
 		Listeners  []rawListener `yaml:"listeners"`
 		GlobalUA   string        `yaml:"global-ua"`
-		TUN        *yaml.Node    `yaml:"tun"`
+		TUN        yaml.Node     `yaml:"tun"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return Connection{}, fmt.Errorf("读取 API 连接信息: %w", err)
 	}
 	port := pickProxyPort(raw.MixedPort, raw.Port, raw.Listeners)
-	hasTUN := raw.TUN != nil && raw.TUN.Tag != "!!null"
+	hasTUN := raw.TUN.Kind != 0 && raw.TUN.Tag != "!!null"
+	tunEnabled := false
+	if hasTUN {
+		var tun struct {
+			Enable bool `yaml:"enable"`
+		}
+		if err := raw.TUN.Decode(&tun); err == nil {
+			tunEnabled = tun.Enable
+		}
+	}
 	ua := strings.TrimSpace(raw.GlobalUA)
 	if raw.Controller == "" {
-		return Connection{Secret: raw.Secret, ProxyPort: port, HasTUN: hasTUN, GlobalUA: ua}, nil
+		return Connection{Secret: raw.Secret, ProxyPort: port, HasTUN: hasTUN, TUNEnabled: tunEnabled, GlobalUA: ua}, nil
 	}
 	endpoint := raw.Controller
 	if !strings.Contains(endpoint, "://") {
@@ -104,11 +114,12 @@ func ReadConnection(data []byte) (Connection, error) {
 		}
 	}
 	return Connection{
-		Endpoint:  strings.TrimRight(u.String(), "/"),
-		Secret:    raw.Secret,
-		ProxyPort: port,
-		HasTUN:    hasTUN,
-		GlobalUA:  ua,
+		Endpoint:   strings.TrimRight(u.String(), "/"),
+		Secret:     raw.Secret,
+		ProxyPort:  port,
+		HasTUN:     hasTUN,
+		TUNEnabled: tunEnabled,
+		GlobalUA:   ua,
 	}, nil
 }
 

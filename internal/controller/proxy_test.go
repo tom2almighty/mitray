@@ -30,7 +30,7 @@ func TestProxyServerTargetsPort(t *testing.T) {
 }
 
 func TestProxyTargetsCoreRequiresEnabledProxy(t *testing.T) {
-	c, _, core, system, _ := fixture(t, false, nil)
+	c, _, core, system, _ := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestToggleProxyRequiresLiveCoreOnlyWhenEnabling(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("stale controller PID", func(t *testing.T) {
-		c, _, core, system, _ := fixture(t, false, nil)
+		c, _, core, system, _ := fixture(t, false)
 		if err := c.Boot(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -76,7 +76,7 @@ func TestToggleProxyRequiresLiveCoreOnlyWhenEnabling(t *testing.T) {
 	})
 
 	t.Run("API failure", func(t *testing.T) {
-		c, api, _, system, _ := fixture(t, false, nil)
+		c, api, _, system, _ := fixture(t, false)
 		if err := c.Boot(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func TestToggleProxyRequiresLiveCoreOnlyWhenEnabling(t *testing.T) {
 	})
 
 	t.Run("disable after core exit", func(t *testing.T) {
-		c, _, core, system, _ := fixture(t, false, nil)
+		c, _, core, system, _ := fixture(t, false)
 		if err := c.Boot(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +108,7 @@ func TestToggleProxyRequiresLiveCoreOnlyWhenEnabling(t *testing.T) {
 }
 
 func TestSnapshotRevisionOnlyChangesWithContentView(t *testing.T) {
-	c, _, _, system, _ := fixture(t, false, nil)
+	c, _, _, system, _ := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestSnapshotRevisionOnlyChangesWithContentView(t *testing.T) {
 }
 
 func TestStopAndDisableProxyDisablesProxyAndStopsCore(t *testing.T) {
-	c, _, core, system, _ := fixture(t, false, nil)
+	c, _, core, system, _ := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)

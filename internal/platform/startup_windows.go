@@ -159,7 +159,7 @@ func taskXML(userID, executable, level string, delay int) string {
   <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>%s</UserId><Delay>PT%dS</Delay></LogonTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>%s</UserId><LogonType>InteractiveToken</LogonType><RunLevel>%s</RunLevel></Principal></Principals>
   <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>
-  <Actions Context="Author"><Exec><Command>%s</Command><Arguments>--autostart</Arguments><WorkingDirectory>%s</WorkingDirectory></Exec></Actions>
+  <Actions Context="Author"><Exec><Command>%s</Command><WorkingDirectory>%s</WorkingDirectory></Exec></Actions>
 </Task>`, xmlText(userID), delay, xmlText(userID), runLevel, xmlText(executable), xmlText(filepath.Dir(executable)))
 }
 

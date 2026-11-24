@@ -132,9 +132,10 @@ func (a *app) createWindow() error {
 					}},
 					PushButton{AssignTo: &a.tunButton, Text: "切换 TUN", OnClicked: func() { a.run("正在切换 TUN…", a.controller.ToggleTUN, false, nil) }},
 					PushButton{AssignTo: &a.proxyButton, Text: "切换系统代理", OnClicked: func() { a.run("正在切换系统代理…", a.controller.ToggleProxy, false, nil) }},
+					PushButton{AssignTo: &a.openConfigButton, Text: "打开配置文件", OnClicked: a.openActiveConfig},
 					HSpacer{},
 				}},
-				Label{AssignTo: &a.memoryLabel, Text: "TUN 状态会在成功切换后自动记忆。", TextColor: systemMutedColor()},
+				Label{AssignTo: &a.hintLabel, Text: "启动或重启核心时遵循配置文件的 TUN 设置；手动切换仅本次生效。", TextColor: systemMutedColor()},
 			}},
 			Composite{AssignTo: &a.settingsBody, Layout: VBox{MarginsZero: true, Spacing: 14}, Children: []Widget{
 				GroupBox{Title: "核心与配置", Layout: VBox{Spacing: 10}, Children: []Widget{

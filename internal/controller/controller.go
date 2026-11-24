@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -33,14 +34,12 @@ type System interface {
 
 type SettingsStore interface{ Save(config.Settings) error }
 
-// ErrTUNRestore allows startup recovery failures to notify the user once.
-var ErrTUNRestore = errors.New("恢复 TUN 启动记忆失败，本次核心运行期间不再自动重试")
-
 type Snapshot struct {
 	Settings         config.Settings
 	Running          bool
 	PID              int
 	TUN, Proxy       *bool
+	ConfigTUNEnabled bool
 	ProxyServer      string
 	ProxyTargetsCore bool
 	WebURL           string
@@ -48,8 +47,8 @@ type Snapshot struct {
 	Revision         uint64
 }
 
-// All mutations (including lifecycle operations and recovery) share op.
-// Polling is read-only and never overrides the TUN state of external cores.
+// All mutations (including lifecycle operations) share op.
+// Polling is read-only and never overrides the running core's TUN state.
 // UI reads use a separate lock and cannot block on HTTP.
 type Controller struct {
 	op                          sync.Mutex
@@ -65,6 +64,7 @@ type Controller struct {
 	activeExe                   string
 	client                      *mihomo.Client
 	hasTUNConfig                bool
+	configTUNEnabled            bool
 	tun, proxy                  *bool
 	proxyServer                 string
 	proxyPort                   int
@@ -127,6 +127,7 @@ func (c *Controller) publish() {
 		Running:          c.pid != 0,
 		PID:              c.pid,
 		TUN:              copyBool(c.tun),
+		ConfigTUNEnabled: c.configTUNEnabled,
 		Proxy:            copyBool(c.proxy),
 		ProxyServer:      c.proxyServer,
 		ProxyTargetsCore: c.proxy != nil && *c.proxy && proxyServerTargetsPort(c.proxyServer, c.proxyPort),
@@ -233,22 +234,18 @@ func (c *Controller) start(ctx context.Context, prepared *source) error {
 	}
 	c.pid, c.tun = pid, nil
 	c.publish()
-	if newProcess && c.cfg.TUNEnabled != nil {
-		return c.restoreTUN(ctx)
-	}
-	return c.waitReady(ctx)
-}
-
-func (c *Controller) restoreTUN(ctx context.Context) (err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("%w: %w", ErrTUNRestore, err)
-		}
-	}()
 	if err := c.waitReady(ctx); err != nil {
 		return err
 	}
-	return c.applyTUN(ctx, *c.cfg.TUNEnabled)
+	if newProcess && c.configTUNEnabled && !c.system.IsAdmin() && (c.tun == nil || !*c.tun) {
+		hint := "当前配置文件启用了 TUN，但 MiTray 未以管理员身份运行，请以管理员身份重新启动。"
+		if c.notice == "" {
+			c.notice = hint
+		} else {
+			c.notice += "；" + hint
+		}
+	}
+	return nil
 }
 
 func (c *Controller) checkCore() error {
@@ -266,6 +263,7 @@ func (c *Controller) setClient(conn mihomo.Connection) {
 	c.client = mihomo.NewClient(conn)
 	c.proxyPort = conn.ProxyPort
 	c.hasTUNConfig = conn.HasTUN
+	c.configTUNEnabled = conn.TUNEnabled
 }
 
 func (c *Controller) waitReady(ctx context.Context) error {
@@ -313,36 +311,6 @@ func (c *Controller) StopAndDisableProxy(ctx context.Context) error {
 	return c.stop()
 }
 
-func (c *Controller) disableTUNBeforeStop() {
-	if c.pid == 0 || c.client == nil || c.tun == nil || !*c.tun {
-		return
-	}
-	if !c.core.Alive(c.pid, c.activeExe) {
-		return
-	}
-	graceCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := c.client.SetTUN(graceCtx, false); err != nil {
-		return
-	}
-	step := c.retryInterval
-	if step > 200*time.Millisecond {
-		step = 200 * time.Millisecond
-	}
-	for range 5 {
-		if !c.core.Alive(c.pid, c.activeExe) {
-			return
-		}
-		if s, err := c.client.Status(graceCtx); err == nil && s.TUN != nil && !*s.TUN {
-			c.acceptStatus(s)
-			return
-		}
-		if pause(graceCtx, step) != nil {
-			return
-		}
-	}
-}
-
 func (c *Controller) stop() error {
 	if c.pid == 0 {
 		exe := c.cfg.Resolve(c.base, c.cfg.CorePath)
@@ -353,7 +321,6 @@ func (c *Controller) stop() error {
 		c.pid, c.activeExe = pid, exe
 	}
 	if c.pid != 0 {
-		c.disableTUNBeforeStop()
 		if err := c.core.Stop(c.pid, c.activeExe); err != nil {
 			return fmt.Errorf("停止 mihomo: %w", err)
 		}
@@ -467,17 +434,7 @@ func (c *Controller) ToggleTUN(ctx context.Context) error {
 	if s.TUN == nil {
 		return errors.New("mihomo 未返回 TUN 状态，请在 WebUI 查看日志")
 	}
-	target := !*s.TUN
-	if err := c.applyTUN(ctx, target); err != nil {
-		return err
-	}
-	next := c.cfg.Clone()
-	next.TUNEnabled = &target
-	if err := c.store.Save(next); err != nil {
-		return fmt.Errorf("TUN 已切换，但记忆保存失败，下次启动仍使用原记录: %w", err)
-	}
-	c.cfg = next
-	return nil
+	return c.applyTUN(ctx, !*s.TUN)
 }
 
 func (c *Controller) applyTUN(ctx context.Context, target bool) error {
@@ -488,7 +445,7 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 		return nil
 	}
 	if target && c.ownedPID != 0 && c.ownedPID == c.pid && !c.system.IsAdmin() {
-		return errors.New("当前 MiTray 未以管理员身份运行，无法启用 TUN；请使用「以管理员身份重新启动」或「清除 TUN 记忆」")
+		return errors.New("当前 MiTray 未以管理员身份运行，无法启用 TUN；请使用「以管理员身份重新启动」")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
@@ -533,12 +490,12 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 		}
 	}
 	if last != nil {
-		return fmt.Errorf("TUN 切换未确认，原记忆已保留: %w", last)
+		return fmt.Errorf("TUN 切换未确认: %w", last)
 	}
 	if target && !c.hasTUNConfig {
-		return errors.New("TUN 未达到目标状态，原记忆已保留；当前配置文件未包含 tun 段落，请检查 YAML 中的 tun/dns 配置并确认 mihomo 具有管理员权限")
+		return errors.New("TUN 未达到目标状态；当前配置文件未包含 tun 段落，请检查 YAML 中的 tun/dns 配置并确认 mihomo 具有管理员权限")
 	}
-	return errors.New("TUN 未达到目标状态，原记忆已保留；请在 WebUI 查看日志，并确认 mihomo 具有管理员权限")
+	return errors.New("TUN 未达到目标状态；请在 WebUI 查看日志，并确认 mihomo 具有管理员权限")
 }
 
 func (c *Controller) ToggleProxy(ctx context.Context) error {
@@ -601,17 +558,43 @@ func (c *Controller) ProxyPort(ctx context.Context) (int, error) {
 	return src.connection.ProxyPort, nil
 }
 
-func (c *Controller) ForgetTUN() error {
-	c.op.Lock()
-	defer c.op.Unlock()
-	defer c.publish()
-	next := c.cfg.Clone()
-	next.TUNEnabled = nil
-	if err := c.store.Save(next); err != nil {
-		return err
+// ActiveConfigPath returns the local YAML path or cached remote YAML path for
+// the currently active profile without mutating core state or downloading.
+func (c *Controller) ActiveConfigPath() (string, error) {
+	s := c.Snapshot().Settings
+	profile, ok := s.ActiveProfileConfig()
+	if !ok {
+		return "", errors.New("请先在设置中选择 mihomo 配置文件")
 	}
-	c.cfg = next
-	return nil // Follow YAML on the next core start; do not force a reload now.
+	switch profile.Type {
+	case config.ProfileLocal:
+		path := profile.Resolve(c.base)
+		if path == "" {
+			return "", errors.New("请先在设置中选择本地 mihomo 配置文件")
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("无法找到配置文件: %w", err)
+		}
+		if info.IsDir() {
+			return "", errors.New("当前配置路径是文件夹")
+		}
+		return path, nil
+	case config.ProfileURL:
+		if strings.TrimSpace(profile.URL) == "" {
+			return "", errors.New("请先填写远程配置 URL")
+		}
+		path := filepath.Join(c.base, "cache", remoteCacheName(profile.URL))
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return "", errors.New("远程配置尚未缓存，请先启动或重启核心下载")
+			}
+			return "", fmt.Errorf("无法读取远程配置缓存: %w", err)
+		}
+		return path, nil
+	default:
+		return "", errors.New("配置来源类型无效")
+	}
 }
 
 func (c *Controller) SaveSettings(ctx context.Context, next config.Settings) error {
@@ -626,7 +609,6 @@ func (c *Controller) saveSettings(ctx context.Context, next config.Settings) err
 		return err
 	}
 	next = next.Clone()
-	next.TUNEnabled = copyBool(c.cfg.TUNEnabled) // An open settings window may be stale.
 	old := c.cfg
 	taskChanged := next.StartupLevel != old.StartupLevel || (next.StartupLevel != "off" && next.StartupDelay != old.StartupDelay)
 	if taskChanged {

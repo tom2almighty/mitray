@@ -7,7 +7,7 @@ func TestConnectionFieldsAndWebURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Endpoint != "http://127.0.0.1:9090" || c.ProxyPort != 7890 {
+	if c.Endpoint != "http://127.0.0.1:9090" || c.ProxyPort != 7890 || !c.HasTUN || !c.TUNEnabled {
 		t.Fatalf("unexpected connection: %+v", c)
 	}
 	if c.WebURL() != "http://127.0.0.1:9090/ui/?secret=a%23b%26c" {
@@ -33,8 +33,24 @@ func TestWebURLEmptyWithoutEndpoint(t *testing.T) {
 	if c.WebURL() != "" {
 		t.Fatalf("expected empty WebURL without external-controller, got %q", c.WebURL())
 	}
-	if c.HasTUN {
-		t.Fatal("expected HasTUN=false when tun block is absent")
+	if c.HasTUN || c.TUNEnabled {
+		t.Fatal("expected HasTUN=false and TUNEnabled=false when tun block is absent")
+	}
+
+	cNull, err := ReadConnection([]byte("mixed-port: 7890\ntun: null\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cNull.HasTUN || cNull.TUNEnabled {
+		t.Fatalf("expected HasTUN=false and TUNEnabled=false for tun: null, got %+v", cNull)
+	}
+
+	cDisabled, err := ReadConnection([]byte("mixed-port: 7890\ntun:\n  enable: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cDisabled.HasTUN || cDisabled.TUNEnabled {
+		t.Fatalf("expected HasTUN=true and TUNEnabled=false, got %+v", cDisabled)
 	}
 }
 

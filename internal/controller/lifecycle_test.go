@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func TestBootConnectsExistingCoreWithoutRestoring(t *testing.T) {
+func TestBootConnectsExistingCoreWithoutPatching(t *testing.T) {
 	for _, autoStart := range []bool{false, true} {
-		c, api, core, _, store := fixture(t, true, ptr(false))
+		c, api, core, _, store := fixture(t, true)
 		c.cfg.AutoStartCore = autoStart
 		core.pid = 200
 		ctx := context.Background()
@@ -29,17 +29,15 @@ func TestBootConnectsExistingCoreWithoutRestoring(t *testing.T) {
 func TestRefreshObservesExternalNewCoreWithoutOverridingTUN(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		memory *bool
 		actual bool
 		gap    bool
 	}{
-		{"remember off vs actual on", ptr(false), true, false},
-		{"remember on vs actual off after exit", ptr(true), false, true},
-		{"already matches", ptr(false), false, false},
-		{"no memory", nil, true, false},
+		{"actual on", true, false},
+		{"actual off after exit", false, true},
+		{"actual off", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, api, core, system, store := fixture(t, false, tc.memory)
+			c, api, core, system, store := fixture(t, false)
 			ctx := context.Background()
 			if err := c.Boot(ctx); err != nil {
 				t.Fatal(err)
@@ -65,14 +63,14 @@ func TestRefreshObservesExternalNewCoreWithoutOverridingTUN(t *testing.T) {
 				t.Fatalf("refresh modified external core: enabled=%t want=%t patches=%d->%d", api.enabled, tc.actual, before, api.patches)
 			}
 			if len(store.saved) != 0 || system.changes != 0 || core.starts != 1 {
-				t.Fatal("refresh changed memory, proxy, or started another core")
+				t.Fatal("refresh changed settings, proxy, or started another core")
 			}
 		})
 	}
 }
 
-func TestAPIReconnectDoesNotRestoreTUN(t *testing.T) {
-	c, api, _, _, _ := fixture(t, false, ptr(false))
+func TestAPIReconnectDoesNotPatchTUN(t *testing.T) {
+	c, api, _, _, _ := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -98,7 +96,7 @@ func TestAPIReconnectDoesNotRestoreTUN(t *testing.T) {
 }
 
 func TestRenamingActiveProfileDoesNotRestartCore(t *testing.T) {
-	c, _, core, _, _ := fixture(t, false, nil)
+	c, _, core, _, _ := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -113,25 +111,5 @@ func TestRenamingActiveProfileDoesNotRestartCore(t *testing.T) {
 	}
 	if core.starts != 1 || core.stops != 0 {
 		t.Fatalf("profile rename restarted the core: %+v", core.events)
-	}
-}
-
-func TestForgetTUNLeavesCurrentAndFutureCoreUnchanged(t *testing.T) {
-	c, api, _, _, store := fixture(t, false, ptr(false))
-	ctx := context.Background()
-	if err := c.Boot(ctx); err != nil {
-		t.Fatal(err)
-	}
-	api.mu.Lock()
-	api.enabled = true
-	api.mu.Unlock()
-	if err := c.ForgetTUN(); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Restart(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(store.saved) != 1 || store.saved[0].TUNEnabled != nil {
-		t.Fatal("cleared memory was not saved")
 	}
 }

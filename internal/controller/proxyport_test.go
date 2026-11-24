@@ -13,7 +13,7 @@ import (
 
 func TestProxyPortReadsSelectedConfigWithoutCore(t *testing.T) {
 	ctx := context.Background()
-	c, _, core, _, _ := fixture(t, false, nil)
+	c, _, core, _, _ := fixture(t, false)
 	c.cfg.AutoStartCore = false
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -41,7 +41,7 @@ func TestProxyPortReadsSelectedConfigWithoutCore(t *testing.T) {
 
 func TestProxyPortPrefersLiveCoreState(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, _, _ := fixture(t, false, nil)
+	c, _, _, _, _ := fixture(t, false)
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestProxyPortPrefersLiveCoreState(t *testing.T) {
 
 func TestProxyPortUsesRemoteCacheOnly(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, _, _ := fixture(t, false, nil)
+	c, _, _, _, _ := fixture(t, false)
 	c.cfg.AutoStartCore = false
 	c.cfg.Profiles["default"] = config.Profile{Type: config.ProfileURL, URL: "https://example.com/mihomo.yaml"}
 	if err := c.Boot(ctx); err != nil {

@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -132,7 +131,7 @@ func (f *apiFixture) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestAuthenticationFailureDoesNotRetry(t *testing.T) {
-	c, api, _, _, _ := fixture(t, false, nil)
+	c, api, _, _, _ := fixture(t, false)
 	api.authFail = true
 	if err := c.Boot(context.Background()); err == nil || !strings.Contains(err.Error(), "secret") {
 		t.Fatalf("expected secret error, got %v", err)
@@ -142,7 +141,7 @@ func TestAuthenticationFailureDoesNotRetry(t *testing.T) {
 	}
 }
 
-func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFixture, *fakeCore, *fakeSystem, *fakeStore) {
+func fixture(t *testing.T, initial bool) (*Controller, *apiFixture, *fakeCore, *fakeSystem, *fakeStore) {
 	t.Helper()
 	api := &apiFixture{enabled: initial}
 	srv := httptest.NewServer(http.HandlerFunc(api.serve))
@@ -159,7 +158,6 @@ func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFix
 	cfg := config.Default()
 	cfg.CorePath = exe
 	cfg.Profiles["default"] = config.Profile{Type: config.ProfileLocal, Path: path}
-	cfg.TUNEnabled = remembered
 	core, system, store := &fakeCore{}, &fakeSystem{admin: true}, &fakeStore{}
 	c := New(base, cfg, store, core, system)
 	c.readyTimeout = time.Second
@@ -172,42 +170,34 @@ func fixture(t *testing.T, initial bool, remembered *bool) (*Controller, *apiFix
 	return c, api, core, system, store
 }
 
-func TestBootTUNMatrix(t *testing.T) {
+func TestBootFollowsYAMLWithoutPatching(t *testing.T) {
 	for _, yamlState := range []bool{false, true} {
-		for _, memory := range []*bool{nil, ptr(false), ptr(true)} {
-			name := fmt.Sprintf("yaml=%t remembered=%v", yamlState, memory)
-			t.Run(name, func(t *testing.T) {
-				c, api, _, system, store := fixture(t, yamlState, memory)
-				if err := c.Boot(context.Background()); err != nil {
-					t.Fatal(err)
-				}
-				want := yamlState
-				if memory != nil {
-					want = *memory
-				}
-				if api.enabled != want {
-					t.Fatalf("got %t want %t", api.enabled, want)
-				}
-				patches := 0
-				if want != yamlState {
-					patches = 1
-				}
-				if api.patches != patches {
-					t.Fatalf("patches %d want %d", api.patches, patches)
-				}
-				if len(store.saved) != 0 {
-					t.Fatal("boot must not learn observed state")
-				}
-				if system.changes != 0 {
-					t.Fatal("TUN must not change system proxy")
-				}
-			})
-		}
+		t.Run(fmt.Sprintf("yaml=%t", yamlState), func(t *testing.T) {
+			c, api, _, system, store := fixture(t, yamlState)
+			if err := c.Boot(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if api.enabled != yamlState {
+				t.Fatalf("got %t want %t", api.enabled, yamlState)
+			}
+			if api.patches != 0 {
+				t.Fatalf("boot sent %d PATCH requests, want 0", api.patches)
+			}
+			if len(store.saved) != 0 {
+				t.Fatal("boot must not persist TUN state")
+			}
+			if system.changes != 0 {
+				t.Fatal("TUN must not change system proxy")
+			}
+			if c.Snapshot().ConfigTUNEnabled != yamlState {
+				t.Fatalf("ConfigTUNEnabled = %t, want %t", c.Snapshot().ConfigTUNEnabled, yamlState)
+			}
+		})
 	}
 }
 
-func TestToggleRememberAndRefreshIsReadOnly(t *testing.T) {
-	c, api, _, system, store := fixture(t, false, nil)
+func TestToggleTUNIsEphemeralAndRefreshIsReadOnly(t *testing.T) {
+	c, api, _, system, store := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -215,8 +205,11 @@ func TestToggleRememberAndRefreshIsReadOnly(t *testing.T) {
 	if err := c.ToggleTUN(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.saved) != 1 || store.saved[0].TUNEnabled == nil || !*store.saved[0].TUNEnabled {
-		t.Fatal("successful toggle not remembered")
+	if !api.enabled || !*c.Snapshot().TUN {
+		t.Fatal("manual toggle did not enable TUN")
+	}
+	if len(store.saved) != 0 {
+		t.Fatal("manual toggle must not persist TUN state")
 	}
 	api.mu.Lock()
 	api.enabled = false
@@ -227,16 +220,16 @@ func TestToggleRememberAndRefreshIsReadOnly(t *testing.T) {
 	if api.patches != 1 {
 		t.Fatal("refresh fought an external change")
 	}
-	if !*c.Snapshot().Settings.TUNEnabled || *c.Snapshot().TUN {
-		t.Fatal("actual and remembered state conflated")
+	if *c.Snapshot().TUN {
+		t.Fatal("refresh did not observe external TUN state")
 	}
 	if system.changes != 0 {
 		t.Fatal("TUN changed proxy")
 	}
 }
 
-func TestFailuresKeepPreferenceAndUnknownState(t *testing.T) {
-	c, api, _, _, store := fixture(t, false, ptr(false))
+func TestFailuresLeaveTUNUnknownWithoutSaving(t *testing.T) {
+	c, api, _, _, store := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -247,8 +240,8 @@ func TestFailuresKeepPreferenceAndUnknownState(t *testing.T) {
 	if err := c.ToggleTUN(ctx); err == nil {
 		t.Fatal("expected failed PATCH")
 	}
-	if len(store.saved) != 0 || *c.Snapshot().Settings.TUNEnabled {
-		t.Fatal("failure changed memory")
+	if len(store.saved) != 0 {
+		t.Fatal("failure wrote settings")
 	}
 	api.mu.Lock()
 	api.getFail = true
@@ -259,36 +252,19 @@ func TestFailuresKeepPreferenceAndUnknownState(t *testing.T) {
 	if c.Snapshot().TUN != nil {
 		t.Fatal("unreachable API must show unknown")
 	}
-	if *c.Snapshot().Settings.TUNEnabled {
-		t.Fatal("refresh failure changed preference")
-	}
 }
 
-func TestPersistenceFailureIsReported(t *testing.T) {
-	c, api, _, _, store := fixture(t, false, ptr(false))
-	ctx := context.Background()
-	if err := c.Boot(ctx); err != nil {
-		t.Fatal(err)
-	}
-	store.err = errors.New("disk full")
-	if err := c.ToggleTUN(ctx); err == nil {
-		t.Fatal("must report disk failure")
-	}
-	if !api.enabled || !*c.Snapshot().TUN {
-		t.Fatal("must display the actual applied state")
-	}
-	if *c.Snapshot().Settings.TUNEnabled {
-		t.Fatal("failed disk write claimed persistence")
-	}
-}
-
-func TestDelayedReadinessAndRestartOrder(t *testing.T) {
-	c, api, core, _, _ := fixture(t, false, ptr(true))
+func TestDelayedReadinessAndRestartFollowsYAML(t *testing.T) {
+	c, api, core, _, store := fixture(t, false)
 	api.delayGets = 3
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := c.ToggleTUN(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the restarted core booting from YAML (tun.enable: false).
 	api.mu.Lock()
 	api.enabled = false
 	api.mu.Unlock()
@@ -298,32 +274,13 @@ func TestDelayedReadinessAndRestartOrder(t *testing.T) {
 	if fmt.Sprint(core.events) != "[start stop start]" {
 		t.Fatalf("wrong lifecycle order: %v", core.events)
 	}
-	if !api.enabled {
-		t.Fatal("restart did not restore preference")
-	}
-}
-
-func TestStaleSettingsCannotOverwriteTUN(t *testing.T) {
-	c, _, _, _, _ := fixture(t, false, nil)
-	ctx := context.Background()
-	if err := c.Boot(ctx); err != nil {
-		t.Fatal(err)
-	}
-	draft := c.Snapshot().Settings
-	if err := c.ToggleTUN(ctx); err != nil {
-		t.Fatal(err)
-	}
-	draft.StartupDelay = 25
-	if err := c.SaveSettings(ctx, draft); err != nil {
-		t.Fatal(err)
-	}
-	if c.Snapshot().Settings.TUNEnabled == nil || !*c.Snapshot().Settings.TUNEnabled {
-		t.Fatal("open settings form overwrote latest TUN preference")
+	if api.enabled || api.patches != 1 || len(store.saved) != 0 {
+		t.Fatalf("restart must follow YAML without re-applying prior toggle: enabled=%t patches=%d saves=%d", api.enabled, api.patches, len(store.saved))
 	}
 }
 
 func TestConcurrentTogglesAreSerialized(t *testing.T) {
-	c, api, _, _, store := fixture(t, false, nil)
+	c, api, _, _, store := fixture(t, false)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
@@ -339,26 +296,29 @@ func TestConcurrentTogglesAreSerialized(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if api.enabled || len(store.saved) != 10 {
-		t.Fatalf("lost toggles: state=%t saves=%d", api.enabled, len(store.saved))
+	if api.enabled || len(store.saved) != 0 {
+		t.Fatalf("unexpected concurrent toggle state: enabled=%t saves=%d", api.enabled, len(store.saved))
 	}
 }
 
-func TestNonAdminFastFailsEnableTUN(t *testing.T) {
-	t.Run("boot restore", func(t *testing.T) {
-		c, api, _, system, _ := fixture(t, false, ptr(true))
+func TestNonAdminTUNWarningsAndFastFail(t *testing.T) {
+	t.Run("boot hints when YAML enables TUN without admin", func(t *testing.T) {
+		c, api, _, system, _ := fixture(t, true)
+		api.enabled = false // Core could not create TUN without admin.
 		system.admin = false
-		err := c.Boot(context.Background())
-		if !errors.Is(err, ErrTUNRestore) || !strings.Contains(err.Error(), "管理员") {
-			t.Fatalf("expected non-admin restore error, got %v", err)
+		if err := c.Boot(context.Background()); err != nil {
+			t.Fatalf("unexpected boot error: %v", err)
 		}
 		if api.patches != 0 {
-			t.Fatalf("non-admin restore sent %d PATCH requests, want 0", api.patches)
+			t.Fatalf("boot sent %d PATCH requests, want 0", api.patches)
+		}
+		if !strings.Contains(c.Snapshot().Notice, "管理员") {
+			t.Fatalf("expected admin notice, got %q", c.Snapshot().Notice)
 		}
 	})
 
-	t.Run("manual toggle", func(t *testing.T) {
-		c, api, _, system, store := fixture(t, false, nil)
+	t.Run("manual toggle fast-fails without admin", func(t *testing.T) {
+		c, api, _, system, store := fixture(t, false)
 		system.admin = false
 		ctx := context.Background()
 		if err := c.Boot(ctx); err != nil {
@@ -414,27 +374,59 @@ func TestMissingTUNSectionHintWhenPATCHDoesNotEnable(t *testing.T) {
 	}
 }
 
-func TestStopDisablesActiveTUNBeforeStoppingCore(t *testing.T) {
-	c, api, core, _, store := fixture(t, false, ptr(true))
+func TestStopTerminatesCoreDirectlyWithoutPatchingTUN(t *testing.T) {
+	c, api, core, _, store := fixture(t, true)
 	ctx := context.Background()
 	if err := c.Boot(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !api.enabled {
-		t.Fatal("expected TUN enabled after boot")
-	}
 	if err := c.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if api.enabled {
-		t.Fatal("Stop did not disable active TUN before terminating core")
+	if api.patches != 0 {
+		t.Fatalf("Stop sent %d PATCH requests, want 0", api.patches)
 	}
 	if core.stops != 1 {
 		t.Fatalf("expected 1 core stop, got %d", core.stops)
 	}
-	if c.Snapshot().Settings.TUNEnabled == nil || !*c.Snapshot().Settings.TUNEnabled || len(store.saved) != 0 {
-		t.Fatal("Stop must preserve TUN memory without modifying settings")
+	if len(store.saved) != 0 {
+		t.Fatal("Stop must not modify settings")
 	}
 }
 
-func ptr(b bool) *bool { return &b }
+func TestActiveConfigPath(t *testing.T) {
+	t.Run("local file", func(t *testing.T) {
+		c, _, _, _, _ := fixture(t, false)
+		got, err := c.ActiveConfigPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.cfg.Profiles["default"].Path {
+			t.Fatalf("got %q want %q", got, c.cfg.Profiles["default"].Path)
+		}
+	})
+
+	t.Run("remote cache", func(t *testing.T) {
+		c, _, _, _, _ := fixture(t, false)
+		url := "https://example.com/sub.yaml"
+		c.cfg.Profiles["default"] = config.Profile{Type: config.ProfileURL, URL: url}
+		c.publish()
+		if _, err := c.ActiveConfigPath(); err == nil || !strings.Contains(err.Error(), "尚未缓存") {
+			t.Fatalf("expected uncached remote error, got %v", err)
+		}
+		cachePath := filepath.Join(c.base, "cache", remoteCacheName(url))
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cachePath, []byte("mixed-port: 7890\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.ActiveConfigPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != cachePath {
+			t.Fatalf("got %q want %q", got, cachePath)
+		}
+	})
+}

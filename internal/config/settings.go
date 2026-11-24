@@ -31,14 +31,12 @@ type Settings struct {
 	AutoStartCore bool
 	StartupLevel  string // off, normal, admin; empty means discover an existing task
 	StartupDelay  int
-	TUNEnabled    *bool // nil means the user has not overridden the YAML setting
 }
 
 type fileSettings struct {
 	Core     fileCore           `toml:"core"`
 	Profiles map[string]Profile `toml:"profiles"`
 	Startup  fileStartup        `toml:"startup"`
-	State    fileState          `toml:"state"`
 }
 
 type fileCore struct {
@@ -52,10 +50,6 @@ type fileStartup struct {
 	DelaySeconds int    `toml:"delay_seconds"`
 }
 
-type fileState struct {
-	TUNEnabled *bool `toml:"tun_enabled,omitempty"`
-}
-
 func Default() Settings {
 	return Settings{Profiles: map[string]Profile{}, ActiveProfile: "default", AutoStartCore: true, StartupDelay: 15}
 }
@@ -66,10 +60,6 @@ func (s Settings) Clone() Settings {
 		profiles[name] = profile
 	}
 	s.Profiles = profiles
-	if s.TUNEnabled != nil {
-		b := *s.TUNEnabled
-		s.TUNEnabled = &b
-	}
 	return s
 }
 
@@ -183,7 +173,6 @@ func (s Settings) fileSettings() fileSettings {
 		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile},
 		Profiles: profiles,
 		Startup:  fileStartup{LaunchCore: s.AutoStartCore, TaskLevel: s.StartupLevel, DelaySeconds: s.StartupDelay},
-		State:    fileState{TUNEnabled: s.TUNEnabled},
 	}
 }
 
@@ -192,7 +181,7 @@ func (f fileSettings) settings() Settings {
 	for name, profile := range f.Profiles {
 		profiles[name] = profile
 	}
-	s := Settings{
+	return Settings{
 		CorePath:      f.Core.Path,
 		ActiveProfile: f.Core.ActiveProfile,
 		Profiles:      profiles,
@@ -200,11 +189,6 @@ func (f fileSettings) settings() Settings {
 		StartupLevel:  f.Startup.TaskLevel,
 		StartupDelay:  f.Startup.DelaySeconds,
 	}
-	if f.State.TUNEnabled != nil {
-		b := *f.State.TUNEnabled
-		s.TUNEnabled = &b
-	}
-	return s
 }
 
 func (st Store) Load() (Settings, error) {
@@ -223,9 +207,16 @@ func (st Store) Load() (Settings, error) {
 	if keys := metadata.Undecoded(); len(keys) > 0 {
 		names := make([]string, 0, len(keys))
 		for _, key := range keys {
-			names = append(names, key.String())
+			name := key.String()
+			// Ignore removed legacy TUN state keys so existing configs still load.
+			if name == "state" || name == "state.tun_enabled" {
+				continue
+			}
+			names = append(names, name)
 		}
-		return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
+		if len(names) > 0 {
+			return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
+		}
 	}
 	return file.settings(), nil
 }

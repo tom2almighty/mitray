@@ -7,8 +7,8 @@ Windows 上的轻量 mihomo 托盘控制器，使用 Go 和 Windows 原生控件
 
 ## 功能
 
-- 托盘菜单：启动、重启、停止 mihomo 核心，自动连接已在运行的核心，一键打开 WebUI
-- 系统代理与 TUN 模式独立开关，TUN 支持启动记忆
+- 托盘菜单：启动、重启、停止 mihomo 核心，自动连接已在运行的核心，一键打开 WebUI 和当前配置文件
+- 系统代理与 TUN 模式独立开关，TUN 启动遵循配置文件，手动切换仅本次运行生效
 - 多配置管理：每个档案独立保存来源类型、本地路径或远程 URL，托盘菜单一键切换
 - 开机自启：支持普通或管理员权限，可设置启动延迟
 - 复制代理环境变量：右键菜单选择 PowerShell、CMD 或 Bash，一键写入剪贴板
@@ -26,13 +26,12 @@ Windows 上的轻量 mihomo 托盘控制器，使用 Go 和 Windows 原生控件
 
 ## TUN 行为
 
-MiTray 不修改原始 YAML，仅通过 mihomo API 切换 TUN 开关。
+MiTray 不修改原始 YAML，仅在手动点击切换时通过 mihomo API 临时切换 TUN 开关。
 
-- 开关状态保存在 `mitray.toml` 的 `[state] tun_enabled`；没有该字段时遵循 YAML 的 `tun.enable`。
-- 仅对 MiTray 自己启动的核心进程恢复启动记忆；接管或检测到外部已运行的核心时保留其现有状态。
-- 切换时发送 `PATCH /configs`，请求体仅含 `{"tun":{"enable":true}}` 或 `false`；网卡、协议栈、DNS 和路由遵循配置文件。
+- 每次启动、重启或切换配置档案时完全遵循当前 YAML 的 `tun.enable` 设置，不保存 TUN 记忆。
+- 手动切换时发送 `PATCH /configs`，请求体仅含 `{"tun":{"enable":true}}` 或 `false`；网卡、协议栈、DNS 和路由遵循配置文件，重启核心后恢复为配置文件设置。
+- 如需持久化开关 TUN，可直接点击托盘或设置中的「打开配置文件」修改 YAML 后重启核心。
 - 系统代理与 TUN 可同时启用，互不影响。
-- 托盘菜单「清除 TUN 记忆」后，下次启动核心遵循配置文件。
 
 ## 开发构建
 
