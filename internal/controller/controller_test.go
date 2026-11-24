@@ -44,11 +44,15 @@ func (f *fakeCore) Alive(pid int, exe string) bool {
 }
 
 type fakeSystem struct {
-	proxy   bool
-	server  string
-	changes int
-	level   string
-	admin   bool
+	proxy          bool
+	server         string
+	changes        int
+	level          string
+	delay          int
+	startupErr     error
+	setStartupErr  error
+	startupChanges int
+	admin          bool
 }
 
 func (f *fakeSystem) Proxy() (bool, string, error) { return f.proxy, f.server, nil }
@@ -60,9 +64,24 @@ func (f *fakeSystem) SetProxy(b bool, p int) error {
 	f.changes++
 	return nil
 }
-func (f *fakeSystem) Startup() (string, error)         { return "off", nil }
-func (f *fakeSystem) SetStartup(l string, d int) error { f.level = l; return nil }
-func (f *fakeSystem) IsAdmin() bool                    { return f.admin }
+func (f *fakeSystem) Startup() (string, int, error) {
+	if f.startupErr != nil {
+		return "", defaultStartupDelay, f.startupErr
+	}
+	if f.level == "" {
+		return "off", defaultStartupDelay, nil
+	}
+	return f.level, f.delay, nil
+}
+func (f *fakeSystem) SetStartup(l string, d int) error {
+	if f.setStartupErr != nil {
+		return f.setStartupErr
+	}
+	f.level, f.delay = l, d
+	f.startupChanges++
+	return nil
+}
+func (f *fakeSystem) IsAdmin() bool { return f.admin }
 
 type fakeStore struct {
 	saved []config.Settings
@@ -429,4 +448,44 @@ func TestActiveConfigPath(t *testing.T) {
 			t.Fatalf("got %q want %q", got, cachePath)
 		}
 	})
+}
+
+func TestStartupStateIsTaskSchedulerOnly(t *testing.T) {
+	c, _, _, system, store := fixture(t, false)
+	system.level, system.delay = "admin", 30
+	ctx := context.Background()
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snap := c.Snapshot()
+	if snap.StartupLevel != "admin" || snap.StartupDelay != 30 {
+		t.Fatalf("unexpected boot startup state: level=%q delay=%d", snap.StartupLevel, snap.StartupDelay)
+	}
+	if err := c.SetStartup(ctx, "normal", -1); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.saved) != 0 {
+		t.Fatalf("SetStartup should not write mitray.toml, got %d saves", len(store.saved))
+	}
+	if system.level != "normal" || system.delay != 30 {
+		t.Fatalf("SetStartup did not keep existing delay: level=%q delay=%d", system.level, system.delay)
+	}
+
+	// Unreadable task (e.g. non-admin querying an admin task) must not block saving settings.
+	system.startupErr = fmt.Errorf("access denied")
+	system.setStartupErr = fmt.Errorf("access denied")
+	if err := c.Boot(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c.Snapshot().StartupLevel != "" {
+		t.Fatalf("expected unknown StartupLevel, got %q", c.Snapshot().StartupLevel)
+	}
+	next := c.Snapshot().Settings
+	next.AutoStartCore = false
+	if err := c.SaveSettingsWithStartup(ctx, next, nil); err != nil {
+		t.Fatalf("saving settings with unknown startup failed: %v", err)
+	}
+	if len(store.saved) != 1 || store.saved[0].AutoStartCore {
+		t.Fatalf("settings were not saved: %+v", store.saved)
+	}
 }

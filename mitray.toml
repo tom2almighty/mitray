@@ -1,13 +1,9 @@
 [core]
 path = ''
 active_profile = "default"
+auto_start = true
 
 [profiles.default]
 type = "local"
 path = ''
 # url = "https://example.com/config.yaml"
-
-[startup]
-launch_core = true
-task_level = "off"
-delay_seconds = 15

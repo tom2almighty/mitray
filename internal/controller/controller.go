@@ -27,12 +27,19 @@ type Core interface {
 type System interface {
 	Proxy() (bool, string, error)
 	SetProxy(enabled bool, port int) error
-	Startup() (string, error)
+	Startup() (string, int, error)
 	SetStartup(level string, delay int) error
 	IsAdmin() bool
 }
 
 type SettingsStore interface{ Save(config.Settings) error }
+
+type StartupSpec struct {
+	Level string
+	Delay int
+}
+
+const defaultStartupDelay = 15
 
 type Snapshot struct {
 	Settings         config.Settings
@@ -40,6 +47,8 @@ type Snapshot struct {
 	PID              int
 	TUN, Proxy       *bool
 	ConfigTUNEnabled bool
+	StartupLevel     string // "", "off", "normal", "admin"; "" means unknown/unreadable
+	StartupDelay     int
 	ProxyServer      string
 	ProxyTargetsCore bool
 	WebURL           string
@@ -65,6 +74,8 @@ type Controller struct {
 	client                      *mihomo.Client
 	hasTUNConfig                bool
 	configTUNEnabled            bool
+	startupLevel                string
+	startupDelay                int
 	tun, proxy                  *bool
 	proxyServer                 string
 	proxyPort                   int
@@ -74,7 +85,7 @@ type Controller struct {
 }
 
 func New(base string, cfg config.Settings, store SettingsStore, core Core, system System) *Controller {
-	c := &Controller{base: base, cfg: cfg.Clone(), store: store, core: core, system: system, readyTimeout: 45 * time.Second, retryInterval: 500 * time.Millisecond}
+	c := &Controller{base: base, cfg: cfg.Clone(), store: store, core: core, system: system, startupDelay: defaultStartupDelay, readyTimeout: 45 * time.Second, retryInterval: 500 * time.Millisecond}
 	c.publish()
 	return c
 }
@@ -128,6 +139,8 @@ func (c *Controller) publish() {
 		PID:              c.pid,
 		TUN:              copyBool(c.tun),
 		ConfigTUNEnabled: c.configTUNEnabled,
+		StartupLevel:     c.startupLevel,
+		StartupDelay:     c.startupDelay,
 		Proxy:            copyBool(c.proxy),
 		ProxyServer:      c.proxyServer,
 		ProxyTargetsCore: c.proxy != nil && *c.proxy && proxyServerTargetsPort(c.proxyServer, c.proxyPort),
@@ -159,10 +172,11 @@ func (c *Controller) boot(ctx context.Context, restart bool) error {
 	c.op.Lock()
 	defer c.op.Unlock()
 	defer c.publish()
-	level, err := c.system.Startup()
+	level, delay, err := c.system.Startup()
 	if err == nil {
-		c.cfg.StartupLevel = level
+		c.startupLevel, c.startupDelay = level, delay
 	} else {
+		c.startupLevel = ""
 		c.notice = "无法读取开机自启设置: " + err.Error()
 	}
 	c.readProxy()
@@ -597,34 +611,62 @@ func (c *Controller) ActiveConfigPath() (string, error) {
 	}
 }
 
+func validateStartup(spec StartupSpec) error {
+	switch spec.Level {
+	case "off", "normal", "admin":
+	default:
+		return errors.New("无效的开机自启选项")
+	}
+	if spec.Delay < 0 || spec.Delay > 600 {
+		return errors.New("自启延迟应为 0–600 秒")
+	}
+	return nil
+}
+
 func (c *Controller) SaveSettings(ctx context.Context, next config.Settings) error {
 	c.op.Lock()
 	defer c.op.Unlock()
 	defer c.publish()
-	return c.saveSettings(ctx, next)
+	return c.saveSettings(ctx, next, nil)
 }
 
-func (c *Controller) saveSettings(ctx context.Context, next config.Settings) error {
+func (c *Controller) SaveSettingsWithStartup(ctx context.Context, next config.Settings, startup *StartupSpec) error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	defer c.publish()
+	return c.saveSettings(ctx, next, startup)
+}
+
+func (c *Controller) saveSettings(ctx context.Context, next config.Settings, startup *StartupSpec) error {
 	if err := next.Validate(c.base); err != nil {
 		return err
 	}
+	if startup != nil {
+		if err := validateStartup(*startup); err != nil {
+			return err
+		}
+	}
 	next = next.Clone()
 	old := c.cfg
-	taskChanged := next.StartupLevel != old.StartupLevel || (next.StartupLevel != "off" && next.StartupDelay != old.StartupDelay)
+	oldLevel, oldDelay := c.startupLevel, c.startupDelay
+	taskChanged := startup != nil && (startup.Level != oldLevel || (startup.Level != "off" && startup.Delay != oldDelay))
 	if taskChanged {
-		if err := c.system.SetStartup(next.StartupLevel, next.StartupDelay); err != nil {
+		if err := c.system.SetStartup(startup.Level, startup.Delay); err != nil {
 			return fmt.Errorf("开机自启未更新，设置尚未保存: %w", err)
 		}
 	}
 	if err := c.store.Save(next); err != nil {
-		if taskChanged {
-			if undoErr := c.system.SetStartup(old.StartupLevel, old.StartupDelay); undoErr != nil {
+		if taskChanged && oldLevel != "" {
+			if undoErr := c.system.SetStartup(oldLevel, oldDelay); undoErr != nil {
 				return fmt.Errorf("保存失败: %v；恢复原自启设置也失败: %v", err, undoErr)
 			}
 		}
 		return fmt.Errorf("保存设置失败: %w", err)
 	}
 	c.cfg = next
+	if taskChanged {
+		c.startupLevel, c.startupDelay = startup.Level, startup.Delay
+	}
 	oldProfile, _ := old.ActiveProfileConfig()
 	nextProfile, _ := next.ActiveProfileConfig()
 	changed := old.CorePath != next.CorePath || !reflect.DeepEqual(oldProfile, nextProfile)
@@ -658,16 +700,30 @@ func (c *Controller) SelectProfile(ctx context.Context, name string) error {
 	}
 	next := c.cfg.Clone()
 	next.ActiveProfile = name
-	return c.saveSettings(ctx, next)
+	return c.saveSettings(ctx, next, nil)
 }
 
-func (c *Controller) SetStartup(ctx context.Context, level string) error {
+func (c *Controller) SetStartup(ctx context.Context, level string, delay int) error {
 	c.op.Lock()
 	defer c.op.Unlock()
 	defer c.publish()
-	next := c.cfg.Clone()
-	next.StartupLevel = level
-	return c.saveSettings(ctx, next)
+	if delay < 0 {
+		delay = c.startupDelay
+	}
+	spec := StartupSpec{Level: level, Delay: delay}
+	if err := validateStartup(spec); err != nil {
+		return err
+	}
+	if err := c.system.SetStartup(spec.Level, spec.Delay); err != nil {
+		return err
+	}
+	c.startupLevel = spec.Level
+	if spec.Level == "off" {
+		c.startupDelay = defaultStartupDelay
+	} else {
+		c.startupDelay = spec.Delay
+	}
+	return nil
 }
 
 func pause(ctx context.Context, d time.Duration) error {

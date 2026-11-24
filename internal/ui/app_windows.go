@@ -229,7 +229,7 @@ func (a *app) buildTray() error {
 	for _, item := range []struct{ key, text string }{{"off", "关闭"}, {"normal", "普通权限"}, {"admin", "管理员权限"}} {
 		level := item.key
 		x, e := a.action(sm, item.text, true, func() {
-			a.run("正在更新开机自启…", func(ctx context.Context) error { return a.controller.SetStartup(ctx, level) }, false, func(error) { a.fillStartup() })
+			a.run("正在更新开机自启…", func(ctx context.Context) error { return a.controller.SetStartup(ctx, level, -1) }, false, func(error) { a.fillStartup() })
 		})
 		if e != nil {
 			return e
@@ -452,9 +452,11 @@ func (a *app) render() {
 		x.SetEnabled(!blocked)
 	}
 	for level, x := range a.startup {
-		x.SetChecked(s.Settings.StartupLevel == level)
+		x.SetChecked(s.StartupLevel == level)
 	}
 	a.settingsBody.SetEnabled(!blocked)
+	a.startupCombo.SetEnabled(!blocked && s.StartupLevel != "")
+	a.delay.SetEnabled(!blocked && s.StartupLevel != "")
 	a.saveButton.SetEnabled(!blocked)
 	a.tunButton.SetEnabled(a.tun.Enabled())
 	a.proxyButton.SetEnabled(a.proxy.Enabled())

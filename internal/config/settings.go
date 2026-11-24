@@ -27,31 +27,29 @@ type Profile struct {
 type Settings struct {
 	CorePath      string
 	ActiveProfile string
-	Profiles      map[string]Profile
 	AutoStartCore bool
-	StartupLevel  string // off, normal, admin; empty means discover an existing task
-	StartupDelay  int
+	Profiles      map[string]Profile
 }
 
 type fileSettings struct {
 	Core     fileCore           `toml:"core"`
 	Profiles map[string]Profile `toml:"profiles"`
-	Startup  fileStartup        `toml:"startup"`
 }
 
 type fileCore struct {
 	Path          string `toml:"path"`
 	ActiveProfile string `toml:"active_profile"`
-}
-
-type fileStartup struct {
-	LaunchCore   bool   `toml:"launch_core"`
-	TaskLevel    string `toml:"task_level"`
-	DelaySeconds int    `toml:"delay_seconds"`
+	AutoStart     bool   `toml:"auto_start"`
 }
 
 func Default() Settings {
-	return Settings{Profiles: map[string]Profile{}, ActiveProfile: "default", AutoStartCore: true, StartupDelay: 15}
+	return Settings{
+		ActiveProfile: "default",
+		AutoStartCore: true,
+		Profiles: map[string]Profile{
+			"default": {Type: ProfileLocal},
+		},
+	}
 }
 
 func (s Settings) Clone() Settings {
@@ -114,14 +112,6 @@ func (s Settings) Validate(base string) error {
 	if err := profile.Validate(base); err != nil {
 		return fmt.Errorf("请选择有效的 mihomo 配置档案: %w", err)
 	}
-	if s.StartupDelay < 0 || s.StartupDelay > 600 {
-		return fmt.Errorf("自启延迟应为 0–600 秒")
-	}
-	switch s.StartupLevel {
-	case "", "off", "normal", "admin":
-	default:
-		return fmt.Errorf("无效的开机自启选项")
-	}
 	return nil
 }
 
@@ -170,9 +160,8 @@ func (s Settings) fileSettings() fileSettings {
 		profiles[name] = profile
 	}
 	return fileSettings{
-		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile},
+		Core:     fileCore{Path: s.CorePath, ActiveProfile: s.ActiveProfile, AutoStart: s.AutoStartCore},
 		Profiles: profiles,
-		Startup:  fileStartup{LaunchCore: s.AutoStartCore, TaskLevel: s.StartupLevel, DelaySeconds: s.StartupDelay},
 	}
 }
 
@@ -184,10 +173,8 @@ func (f fileSettings) settings() Settings {
 	return Settings{
 		CorePath:      f.Core.Path,
 		ActiveProfile: f.Core.ActiveProfile,
+		AutoStartCore: f.Core.AutoStart,
 		Profiles:      profiles,
-		AutoStartCore: f.Startup.LaunchCore,
-		StartupLevel:  f.Startup.TaskLevel,
-		StartupDelay:  f.Startup.DelaySeconds,
 	}
 }
 
@@ -199,7 +186,10 @@ func (st Store) Load() (Settings, error) {
 	if err != nil {
 		return Default(), err
 	}
-	file := Default().fileSettings()
+	file := fileSettings{
+		Core:     fileCore{ActiveProfile: "default", AutoStart: true},
+		Profiles: map[string]Profile{},
+	}
 	metadata, err := toml.Decode(string(data), &file)
 	if err != nil {
 		return Default(), fmt.Errorf("解析 %s: %w", filepath.Base(st.Path), err)
@@ -207,16 +197,9 @@ func (st Store) Load() (Settings, error) {
 	if keys := metadata.Undecoded(); len(keys) > 0 {
 		names := make([]string, 0, len(keys))
 		for _, key := range keys {
-			name := key.String()
-			// Ignore removed legacy TUN state keys so existing configs still load.
-			if name == "state" || name == "state.tun_enabled" {
-				continue
-			}
-			names = append(names, name)
+			names = append(names, key.String())
 		}
-		if len(names) > 0 {
-			return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
-		}
+		return Default(), fmt.Errorf("%s 包含未知配置项: %s", filepath.Base(st.Path), strings.Join(names, ", "))
 	}
 	return file.settings(), nil
 }

@@ -74,12 +74,30 @@ func TestSamePathUsesWindowsCaseRules(t *testing.T) {
 
 func TestParseTaskXMLSinglePass(t *testing.T) {
 	executable := `C:\Tools\MiTray\mitray.exe`
-	content := taskXML(`S-1-5-21`, executable, "admin", 15)
+	content := taskXML(`S-1-5-21`, executable, "admin", 42)
 	info, err := parseTaskXML([]byte(content))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.level != "admin" || !samePath(info.command, executable) {
+	if info.level != "admin" || info.delay != 42 || !samePath(info.command, executable) {
 		t.Fatalf("unexpected parsed task info: %+v", info)
+	}
+}
+
+func TestParseTaskDelay(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{"PT0S", 0},
+		{"PT15S", 15},
+		{"PT2M30S", 150},
+		{"PT1H", 600},
+		{"", DefaultStartupDelay},
+		{"invalid", DefaultStartupDelay},
+	} {
+		if got := parseTaskDelay(tc.raw); got != tc.want {
+			t.Fatalf("parseTaskDelay(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
 	}
 }

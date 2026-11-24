@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 )
+
+const DefaultStartupDelay = 15
 
 func (s System) taskName() string {
 	return taskName(s.Executable)
@@ -62,36 +65,85 @@ func decodeOutput(b []byte) []byte {
 
 type taskInfo struct {
 	level   string
+	delay   int
 	command string
 }
 
-func (s System) Startup() (string, error) {
+func (s System) Startup() (string, int, error) {
 	info, exists, err := queryTask(s.taskName())
 	if err != nil {
-		return "", err
+		return "", DefaultStartupDelay, err
 	}
 	if exists {
 		if !samePath(info.command, s.Executable) {
-			return "", fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
+			return "", DefaultStartupDelay, fmt.Errorf("自启任务名已被其他程序占用，未修改现有任务")
 		}
-		return info.level, nil
+		return info.level, info.delay, nil
 	}
 	legacy := legacyTaskName(s.Executable)
 	if legacy == s.taskName() {
-		return "off", nil
+		return "off", DefaultStartupDelay, nil
 	}
 	info, exists, err = queryTask(legacy)
 	if err != nil {
-		return "", err
+		return "", DefaultStartupDelay, err
 	}
 	if !exists || !samePath(info.command, s.Executable) {
-		return "off", nil
+		return "off", DefaultStartupDelay, nil
 	}
-	return info.level, nil
+	return info.level, info.delay, nil
+}
+
+func parseTaskDelay(raw string) int {
+	s := strings.TrimSpace(raw)
+	if !strings.HasPrefix(s, "PT") || len(s) <= 2 {
+		return DefaultStartupDelay
+	}
+	s = s[2:]
+	total := 0
+	numStart := 0
+	parsedAny := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if i == numStart {
+			return DefaultStartupDelay
+		}
+		n, err := strconv.Atoi(s[numStart:i])
+		if err != nil || n < 0 {
+			return DefaultStartupDelay
+		}
+		switch c {
+		case 'H':
+			total += n * 3600
+		case 'M':
+			total += n * 60
+		case 'S':
+			total += n
+		default:
+			return DefaultStartupDelay
+		}
+		parsedAny = true
+		numStart = i + 1
+	}
+	if !parsedAny || numStart != len(s) {
+		return DefaultStartupDelay
+	}
+	if total > 600 {
+		return 600
+	}
+	return total
 }
 
 func parseTaskXML(data []byte) (taskInfo, error) {
 	var task struct {
+		Triggers struct {
+			LogonTrigger struct {
+				Delay string `xml:"Delay"`
+			} `xml:"LogonTrigger"`
+		} `xml:"Triggers"`
 		Principals struct {
 			Principal struct {
 				RunLevel string `xml:"RunLevel"`
@@ -115,7 +167,11 @@ func parseTaskXML(data []byte) (taskInfo, error) {
 	} else if task.Principals.Principal.RunLevel == "HighestAvailable" {
 		level = "admin"
 	}
-	return taskInfo{level: level, command: task.Actions.Exec.Command}, nil
+	return taskInfo{
+		level:   level,
+		delay:   parseTaskDelay(task.Triggers.LogonTrigger.Delay),
+		command: task.Actions.Exec.Command,
+	}, nil
 }
 
 func queryTask(name string) (info taskInfo, exists bool, err error) {
@@ -189,6 +245,9 @@ func (s System) SetStartup(level string, delay int) error {
 	}
 	if level != "admin" && level != "normal" {
 		return fmt.Errorf("无效的自启选项")
+	}
+	if delay < 0 || delay > 600 {
+		return fmt.Errorf("自启延迟应为 0–600 秒")
 	}
 	if ownedLegacy {
 		if err := deleteTask(legacyTaskName(s.Executable)); err != nil {

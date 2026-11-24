@@ -12,6 +12,7 @@ import (
 	. "github.com/lxn/walk/declarative"
 	"github.com/lxn/win"
 	"github.com/tom2almighty/mitray/internal/config"
+	"github.com/tom2almighty/mitray/internal/controller"
 	"github.com/tom2almighty/mitray/internal/platform"
 	"golang.org/x/sys/windows"
 )
@@ -217,7 +218,6 @@ func (a *app) fillSettings() {
 	a.draftActiveProfile = s.ActiveProfile
 	a.coreEdit.SetText(s.CorePath)
 	a.autoStart.SetChecked(s.AutoStartCore)
-	a.delay.SetValue(float64(s.StartupDelay))
 	a.fillStartup()
 	a.refreshProfileModel(s.ActiveProfile)
 	if profile, ok := a.draftProfiles[s.ActiveProfile]; ok {
@@ -235,8 +235,15 @@ func (a *app) fillStartup() {
 	wasFilling := a.filling
 	a.filling = true
 	defer func() { a.filling = wasFilling }()
-	idx := 0
-	switch a.controller.Snapshot().Settings.StartupLevel {
+	snap := a.controller.Snapshot()
+	known := snap.StartupLevel != ""
+	a.startupCombo.SetEnabled(known && !a.busy && !a.stopping)
+	a.delay.SetEnabled(known && !a.busy && !a.stopping)
+	a.delay.SetValue(float64(snap.StartupDelay))
+	idx := -1
+	switch snap.StartupLevel {
+	case "off":
+		idx = 0
 	case "normal":
 		idx = 1
 	case "admin":
@@ -525,16 +532,21 @@ func (a *app) saveSettings() {
 		a.feedback.SetText("请先添加一个配置档案。")
 		return
 	}
-	s := a.controller.Snapshot().Settings
+	snap := a.controller.Snapshot()
+	s := snap.Settings
 	s.CorePath = strings.TrimSpace(a.coreEdit.Text())
 	s.AutoStartCore = a.autoStart.Checked()
-	s.StartupDelay = int(a.delay.Value())
-	levels := []string{"off", "normal", "admin"}
-	idx := a.startupCombo.CurrentIndex()
-	if idx < 0 {
-		idx = 0
+	var startup *controller.StartupSpec
+	if snap.StartupLevel != "" {
+		levels := []string{"off", "normal", "admin"}
+		idx := a.startupCombo.CurrentIndex()
+		if idx >= 0 && idx < len(levels) {
+			startup = &controller.StartupSpec{
+				Level: levels[idx],
+				Delay: int(a.delay.Value()),
+			}
+		}
 	}
-	s.StartupLevel = levels[idx]
 	s.Profiles = make(map[string]config.Profile, len(a.draftProfiles))
 	for name, profile := range a.draftProfiles {
 		s.Profiles[name] = profile
@@ -553,7 +565,7 @@ func (a *app) saveSettings() {
 		a.feedback.SetText(err.Error())
 		return
 	}
-	a.run("正在保存并应用…", func(ctx context.Context) error { return a.controller.SaveSettings(ctx, s) }, false, func(err error) {
+	a.run("正在保存并应用…", func(ctx context.Context) error { return a.controller.SaveSettingsWithStartup(ctx, s, startup) }, false, func(err error) {
 		if err == nil {
 			a.fillSettings()
 			a.feedback.SetText("设置已保存。关闭此窗口后，MiTray 会继续在托盘运行。")
