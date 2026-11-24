@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -54,9 +55,7 @@ func Default() Settings {
 
 func (s Settings) Clone() Settings {
 	profiles := make(map[string]Profile, len(s.Profiles))
-	for name, profile := range s.Profiles {
-		profiles[name] = profile
-	}
+	maps.Copy(profiles, s.Profiles)
 	s.Profiles = profiles
 	return s
 }

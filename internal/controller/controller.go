@@ -111,7 +111,7 @@ func proxyServerTargetsPort(server string, port int) bool {
 	if port < 1 || port > 65535 {
 		return false
 	}
-	for _, entry := range strings.Split(server, ";") {
+	for entry := range strings.SplitSeq(server, ";") {
 		entry = strings.TrimSpace(entry)
 		if i := strings.IndexByte(entry, '='); i >= 0 {
 			entry = strings.TrimSpace(entry[i+1:])
@@ -464,7 +464,7 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	var last error
-	for attempt := 0; attempt < 3; attempt++ {
+	for range 3 {
 		if err := c.checkCore(); err != nil {
 			return err
 		}
@@ -474,7 +474,7 @@ func (c *Controller) applyTUN(ctx context.Context, target bool) error {
 		}
 		if last == nil {
 			// An accepted PATCH is not proof that the adapter was created.
-			for check := 0; check < 3; check++ {
+			for range 3 {
 				if err := c.checkCore(); err != nil {
 					return err
 				}

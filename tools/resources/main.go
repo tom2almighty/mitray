@@ -149,7 +149,7 @@ func encodeDIB32(img *image.NRGBA) []byte {
 
 	// Bottom-up BGRA XOR bitmap
 	for y := h - 1; y >= 0; y-- {
-		for x := 0; x < w; x++ {
+		for x := range w {
 			off := img.PixOffset(x, y)
 			r, g, b, a := img.Pix[off], img.Pix[off+1], img.Pix[off+2], img.Pix[off+3]
 			buf.Write([]byte{b, g, r, a})
@@ -158,10 +158,10 @@ func encodeDIB32(img *image.NRGBA) []byte {
 
 	// Bottom-up 1bpp AND mask (1 = transparent where alpha == 0)
 	mask := make([]byte, maskSize)
-	for y := 0; y < h; y++ {
+	for y := range h {
 		srcY := h - 1 - y
 		rowStart := y * maskRowBytes
-		for x := 0; x < w; x++ {
+		for x := range w {
 			off := img.PixOffset(x, srcY)
 			if img.Pix[off+3] == 0 {
 				mask[rowStart+x/8] |= 0x80 >> uint(x%8)

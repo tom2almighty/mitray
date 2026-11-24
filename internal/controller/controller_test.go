@@ -171,7 +171,7 @@ func fixture(t *testing.T, initial bool) (*Controller, *apiFixture, *fakeCore, *
 	if err := os.WriteFile(exe, []byte("fake"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("external-controller: %s\nmixed-port: 7890\ntun:\n  enable: %t\n  device: custom-adapter\n", srv.URL, initial)), 0600); err != nil {
+	if err := os.WriteFile(path, fmt.Appendf(nil, "external-controller: %s\nmixed-port: 7890\ntun:\n  enable: %t\n  device: custom-adapter\n", srv.URL, initial), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
@@ -369,7 +369,7 @@ func TestMissingTUNSectionHintWhenPATCHDoesNotEnable(t *testing.T) {
 	if err := os.WriteFile(exe, []byte("fake"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("external-controller: %s\nmixed-port: 7890\n", srv.URL)), 0600); err != nil {
+	if err := os.WriteFile(path, fmt.Appendf(nil, "external-controller: %s\nmixed-port: 7890\n", srv.URL), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()

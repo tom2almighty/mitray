@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,7 +35,7 @@ func CenterSettingsWindow(hwnd win.HWND) error {
 		return fmt.Errorf("无法获取显示器工作区，设置窗口未居中")
 	}
 	// Moving across monitors can change DPI and resize the window synchronously.
-	for pass := 0; pass < 2; pass++ {
+	for range 2 {
 		var bounds win.RECT
 		if !win.GetWindowRect(hwnd, &bounds) {
 			return fmt.Errorf("无法获取设置窗口尺寸")
@@ -548,9 +549,7 @@ func (a *app) saveSettings() {
 		}
 	}
 	s.Profiles = make(map[string]config.Profile, len(a.draftProfiles))
-	for name, profile := range a.draftProfiles {
-		s.Profiles[name] = profile
-	}
+	maps.Copy(s.Profiles, a.draftProfiles)
 	s.ActiveProfile = a.draftActiveProfile
 	if _, ok := s.Profiles[s.ActiveProfile]; !ok {
 		s.ActiveProfile = a.editingProfile

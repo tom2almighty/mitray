@@ -32,7 +32,7 @@ func main() {
 	name := fmt.Sprintf("MiTray-%x", hash[:12])
 	restart := slices.Contains(os.Args, "--restart-core")
 	var mutex windows.Handle
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		var first bool
 		mutex, first, err = platform.SingleInstance(name)
 		if err != nil {
