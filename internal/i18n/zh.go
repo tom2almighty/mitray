@@ -119,7 +119,7 @@ var zhMessages = Messages{
 	TrayStartCore:       "启动核心",
 	TrayRestartCore:     "重启核心",
 	TrayStopCore:        "停止核心",
-	TrayQuit:            "退出 MiTray",
+	TrayRestartApp:      "重启 MiTray",
 	TrayStopAndQuit:     "停止核心并退出",
 
 	StateUnknown:           "未知",
@@ -152,11 +152,14 @@ var zhMessages = Messages{
 	ErrClipboardFailed:   "写入剪贴板失败: %s",
 	CopiedProxyEnv:       "已复制 %s 代理环境变量（127.0.0.1:%d）。",
 	ErrElevateFailed:     "未重新启动: %s",
+	ErrRelaunchFailed:    "重启 MiTray 失败: %s",
 
 	DlgStopCoreTitle:       "停止核心",
 	DlgStopProxyConfirm:    "系统代理仍开启并指向 %s。\n\n是否同时关闭系统代理？\n\n• 是：关闭系统代理并停止核心\n• 否：保留系统代理，仅停止核心\n• 取消：不停止核心",
 	DlgStopFailedTitle:     "停止核心失败",
 	DlgStopFailedAskQuit:   "%s\n\n是否仍要退出 MiTray？",
+	DlgRestartLangTitle:    "重启 MiTray",
+	DlgRestartLangPrompt:   "设置已保存，需要重启 MiTray 以应用新语言。\n\n是否立即重启？（不会中断正在运行的核心）",
 	DlgBrowseCoreTitle:     "选择 mihomo 核心",
 	DlgBrowseCoreFilter:    "可执行文件 (*.exe)|*.exe",
 	DlgBrowseConfigTitle:   "选择 mihomo 配置",

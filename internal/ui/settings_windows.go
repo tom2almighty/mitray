@@ -596,6 +596,9 @@ func (a *app) saveSettings() {
 			a.fillSettings()
 			if langChanged {
 				a.feedback.SetText(t.FeedbackSavedLang)
+				if walk.MsgBox(a.window, t.DlgRestartLangTitle, t.DlgRestartLangPrompt, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion|walk.MsgBoxSetForeground) == walk.DlgCmdYes {
+					a.relaunch(true)
+				}
 			} else {
 				a.feedback.SetText(t.FeedbackSaved)
 			}

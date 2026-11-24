@@ -119,7 +119,7 @@ var enMessages = Messages{
 	TrayStartCore:       "Start Core",
 	TrayRestartCore:     "Restart Core",
 	TrayStopCore:        "Stop Core",
-	TrayQuit:            "Quit MiTray",
+	TrayRestartApp:      "Restart MiTray",
 	TrayStopAndQuit:     "Stop Core and Quit",
 
 	StateUnknown:           "Unknown",
@@ -152,11 +152,14 @@ var enMessages = Messages{
 	ErrClipboardFailed:   "Write clipboard failed: %s",
 	CopiedProxyEnv:       "Copied %s proxy env (127.0.0.1:%d).",
 	ErrElevateFailed:     "Not restarted: %s",
+	ErrRelaunchFailed:    "Restart MiTray failed: %s",
 
 	DlgStopCoreTitle:       "Stop Core",
 	DlgStopProxyConfirm:    "System proxy is still enabled and points to %s.\n\nDisable system proxy as well?\n\n• Yes: Disable proxy and stop core\n• No: Keep proxy and stop core only\n• Cancel: Do not stop core",
 	DlgStopFailedTitle:     "Stop Core Failed",
 	DlgStopFailedAskQuit:   "%s\n\nQuit MiTray anyway?",
+	DlgRestartLangTitle:    "Restart MiTray",
+	DlgRestartLangPrompt:   "Settings saved. Restart MiTray to apply the new language.\n\nRestart now? (The running core will not be interrupted.)",
 	DlgBrowseCoreTitle:     "Select mihomo Core",
 	DlgBrowseCoreFilter:    "Executable (*.exe)|*.exe",
 	DlgBrowseConfigTitle:   "Select mihomo Config",

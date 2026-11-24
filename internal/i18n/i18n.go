@@ -138,7 +138,7 @@ type Messages struct {
 	TrayStartCore       string
 	TrayRestartCore     string
 	TrayStopCore        string
-	TrayQuit            string
+	TrayRestartApp      string
 	TrayStopAndQuit     string
 
 	// Status & labels
@@ -173,12 +173,15 @@ type Messages struct {
 	ErrClipboardFailed   string
 	CopiedProxyEnv       string
 	ErrElevateFailed     string
+	ErrRelaunchFailed    string
 
 	// Dialogs
 	DlgStopCoreTitle       string
 	DlgStopProxyConfirm    string
 	DlgStopFailedTitle     string
 	DlgStopFailedAskQuit   string
+	DlgRestartLangTitle    string
+	DlgRestartLangPrompt   string
 	DlgBrowseCoreTitle     string
 	DlgBrowseCoreFilter    string
 	DlgBrowseConfigTitle   string

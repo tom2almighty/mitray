@@ -32,7 +32,10 @@ func main() {
 	base := filepath.Dir(exe)
 	hash := sha256.Sum256([]byte(exe))
 	name := fmt.Sprintf("MiTray-%x", hash[:12])
-	restart := slices.Contains(os.Args, "--restart-core")
+	restartCore := slices.Contains(os.Args, "--restart-core")
+	relaunch := slices.Contains(os.Args, "--relaunch")
+	showSettings := slices.Contains(os.Args, "--show-settings")
+	waitExit := restartCore || relaunch
 	var mutex windows.Handle
 	for range 50 {
 		var first bool
@@ -46,7 +49,7 @@ func main() {
 		}
 		windows.CloseHandle(mutex)
 		mutex = 0
-		if !restart {
+		if !waitExit {
 			for _, windowTitle := range i18n.AllSettingsTitles() {
 				title, _ := windows.UTF16PtrFromString(windowTitle)
 				if h := win.FindWindow(nil, title); h != 0 {
@@ -82,7 +85,7 @@ func main() {
 	c := controller.New(base, cfg, store, platform.NewCore(), platform.System{Executable: exe})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := ui.Run(ctx, c, base, exe, version, restart); err != nil {
+	if err := ui.Run(ctx, c, base, exe, version, restartCore, showSettings); err != nil {
 		platform.MessageBox("MiTray", err.Error())
 	}
 }

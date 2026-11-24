@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -34,7 +35,7 @@ type app struct {
 	dirty                                                        bool
 	quitting                                                     bool
 	start, stop, restart, tun, proxy, web, profiles              *walk.Action
-	openConfig, quitAction, stopQuitAction                       *walk.Action
+	openConfig, relaunchAction, stopQuitAction                   *walk.Action
 	startup                                                      map[string]*walk.Action
 	mutations                                                    []*walk.Action
 	profileActions                                               []*walk.Action
@@ -57,7 +58,7 @@ type app struct {
 	lastRevision                                                 uint64
 }
 
-func Run(ctx context.Context, ctl *controller.Controller, base, exe, version string, restartCore bool) error {
+func Run(ctx context.Context, ctl *controller.Controller, base, exe, version string, restartCore, showSettings bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	a := &app{ctx: ctx, cancel: cancel, controller: ctl, base: base, exe: exe, version: version, startup: map[string]*walk.Action{}}
@@ -111,7 +112,7 @@ func Run(ctx context.Context, ctl *controller.Controller, base, exe, version str
 	firstRun := ctl.Snapshot().Settings.Validate(base) != nil
 	// Queue startup after the native message loop has started.
 	go a.window.Synchronize(func() {
-		if firstRun {
+		if firstRun || showSettings {
 			a.showSettings()
 		}
 		a.run(i18n.T().BusyConnecting, func(ctx context.Context) error {
@@ -260,7 +261,7 @@ func (a *app) buildTray() error {
 	add(&a.restart, t.TrayRestartCore, false, func() { a.run(i18n.T().BusyRestartCore, a.controller.Restart, false, nil) })
 	add(&a.stop, t.TrayStopCore, false, func() { a.stopCore(false) })
 	sep()
-	add(&a.quitAction, t.TrayQuit, false, a.quit)
+	add(&a.relaunchAction, t.TrayRestartApp, false, func() { a.relaunch(false) })
 	add(&a.stopQuitAction, t.TrayStopAndQuit, false, func() { a.stopCore(true) })
 	return err
 }
@@ -454,7 +455,7 @@ func (a *app) render() {
 	a.restart.SetEnabled(!blocked)
 	a.stop.SetEnabled(!blocked && s.Running)
 	a.openConfig.SetEnabled(!a.stopping && hasActiveProfile)
-	a.quitAction.SetEnabled(!a.stopping)
+	a.relaunchAction.SetEnabled(!blocked)
 	a.stopQuitAction.SetEnabled(!a.stopping)
 	a.web.SetEnabled(!a.stopping && s.Running && s.WebURL != "")
 	for _, x := range a.mutations {
@@ -565,10 +566,23 @@ func (a *app) copyEnv(shell, label string) {
 	})
 }
 
-func (a *app) quit() {
-	if a.stopping {
+func (a *app) relaunch(showSettings bool) {
+	if a.busy || a.stopping || a.quitting {
 		return
 	}
+	args := []string{"--relaunch"}
+	if showSettings {
+		args = append(args, "--show-settings")
+	}
+	cmd := exec.Command(a.exe, args...)
+	cmd.Dir = a.base
+	if err := cmd.Start(); err != nil {
+		msg := fmt.Sprintf(i18n.T().ErrRelaunchFailed, err.Error())
+		a.feedback.SetText(msg)
+		a.tray.ShowError("MiTray", msg)
+		return
+	}
+	_ = cmd.Process.Release()
 	a.quitNow()
 }
 
@@ -584,11 +598,18 @@ func (a *app) quitNow() {
 		a.refreshCancel()
 	}
 	a.cancel()
-	a.window.Close()
+	if a.window != nil {
+		a.window.Hide()
+	}
+	if a.tray != nil {
+		_ = a.tray.SetVisible(false)
+		_ = a.tray.Dispose()
+	}
+	walk.App().Exit(0)
 }
 
 func (a *app) elevate() {
-	if a.busy || a.stopping {
+	if a.busy || a.stopping || a.quitting {
 		return
 	}
 	verb, _ := windows.UTF16PtrFromString("runas")
