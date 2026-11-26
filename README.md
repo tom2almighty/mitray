@@ -2,6 +2,10 @@
 
 Windows 上的轻量 mihomo 托盘控制器，使用 Go 和 Windows 原生控件编写。
 
+> [!TIP]
+>
+> 新项目 [mipulse](https://github.com/tom2almighty/mipulse) 使用 Rust + GPUI 构建，集合 mitray 功能，及 mihomo 流量分析并持久化存储。
+
 > [!NOTE]
 > 使用 Golang 重写。1.0.15 版本为 AHK 最后版本，不再维护。
 
